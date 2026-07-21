@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "key-amnesia"
+version = "0.1.0"
+description = "Encrypted secret vault with human-prompt routing and output scrubbing"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "key-amnesia contributors" }]
+dependencies = [
+    "pynacl>=1.5",
+    "pyperclip>=1.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+key-amnesia = "key_amnesia.cli:main"
+ka = "key_amnesia.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
