@@ -1,112 +1,98 @@
 # key-amnesia
 
-Encrypted secret vault for agent-driven CLIs. Secrets stay behind a human prompt; commands get env injection and **buffer-then-scrub** output redaction. Windows-primary.
+**Let your AI agent *use* your passwords and API keys — without ever letting it *see* them.**
+
+![key-amnesia — the vault hands the agent a sealed envelope it cannot open](media/assets/approved/readme-hero.png)
+
+AI coding agents (Claude Code, Cursor, Codex) are incredibly useful — right up until they need an API key. Then your choices are ugly: paste the key into the chat (now it lives in the conversation forever), put it in a plain-text `.env` file the agent can read, or just do that part yourself.
+
+**key-amnesia is the fourth option.** Your secrets live in an encrypted vault. The agent can *trigger* commands that use them — but the actual values are injected directly into the command's environment, out of the agent's sight. If a command tries to print a secret, key-amnesia censors it before the agent sees the output. And the master password can only ever be typed by you, a real human, at a real keyboard: when an agent needs your approval, a **separate console window pops up on your screen** — one the agent cannot read or type into.
+
+The agent gets amnesia. That's the whole point. And every access attempt — allowed or denied — is written to an audit log you can review.
+
+## How it works, in 30 seconds
 
 ```bash
-pip install -e .
-key-amnesia --help   # or: ka --help
+# 1. Store a secret (you type it once, hidden, into a password prompt)
+ka set OPENAI_API_KEY
+
+# 2. The agent runs commands THROUGH key-amnesia instead of holding the key:
+ka run --secret OPENAI_API_KEY --as OPENAI_API_KEY -- python my_script.py
+
+# 3. That's it. The script gets the real key in its environment.
+#    The agent sees the script's output — with any leaked key censored:
+#    "Bearer ***REDACTED(OPENAI_API_KEY)***"
 ```
 
-## Why
+When the agent triggers step 2 and your approval is needed, you'll see a new console window appear with a clear message — *"An agent-driven command is requesting: run with secret OPENAI_API_KEY"* — and only your password, typed there, lets it proceed. Close the window to deny. Nothing the agent controls can type into that window.
 
-Agents need API keys and passwords to run tools, but should not hold long-lived plaintext. key-amnesia stores values in an Argon2id + SecretBox vault, prompts a human (inline TTY or a new Windows console), injects secrets only into a child process, then redacts exact echoes from stdout/stderr before the agent sees them.
-
-## Quick start
+## Install
 
 ```bash
-# Store a secret (prompts for master password; prefer omitting value on argv)
-ka set openai_key
-
-# List names only (no prompt — reads plaintext names sidecar)
-ka list
-
-# Run a command with the secret in the environment; output is scrubbed after exit
-ka run --secret openai_key --as openai_key=OPENAI_API_KEY -- curl -s https://api.example.com
-
-# Always-fresh auth (never uses a live guard shortcut)
-ka reveal openai_key
-ka copy openai_key
-
-# Cached session (optional)
-ka config set session-mode cached
-ka unlock
-ka run --secret openai_key --as openai_key=OPENAI_API_KEY -- some-cmd
-ka lock
+pip install git+https://github.com/fujitoid/key-amnesia
 ```
 
-Data directory: `~/.key-amnesia/` (override with `KEY_AMNESIA_HOME`). Vault path override: `KEY_AMNESIA_VAULT_PATH`.
+Or from a local clone: `pip install .` — either way you get both the full `key-amnesia` command and the short `ka` alias.
 
-## Console routing
+> **Windows-first.** v0 targets Windows. On Linux/Mac the interactive commands work in your own terminal, but the pop-up-console flow for agent-triggered approval is not implemented yet (such calls fail safely with a clear error).
 
+## Two modes: ask every time, or unlock a session
+
+| Mode | What it feels like |
+|------|--------------------|
+| **`per-call`** (default) | Every use of a secret asks for your password. Maximum safety, maximum prompts. |
+| **`cached`** | You run `ka unlock` once in your terminal; a background "guard" keeps the vault open for 30 minutes (configurable). Agent commands run without prompts until it expires or you run `ka lock`. |
+
+```bash
+ka config set session-mode cached   # switch (asks for your password)
+ka unlock                           # start a session
+ka lock                             # end it early, any time
 ```
-Needs human auth
-  ├─ stdin is a TTY  → getpass inline → decrypt in-process
-  └─ not a TTY       → spawn helper with CREATE_NEW_CONSOLE
-                        (bare argv: `_prompt-helper` only;
-                         request / authkey / reply address via env)
-                        → parent waits on IPC (default 90s)
-                        → status / scrubbed I/O only — never password, never raw secrets
-```
 
-**POSIX non-interactive spawn is out of scope for v0** — fail closed with a clear error. Use an interactive terminal, or Windows.
-
-Nothing sensitive is placed on argv (Windows event 4688 records command lines).
-
-## Session modes
-
-| Mode | Behavior |
-|------|----------|
-| `per-call` (default) | Each privileged op prompts; plaintext discarded after use |
-| `cached` | `unlock` starts a guard process holding the decrypted vault until timeout / `lock` |
-
-**Always fresh master-password auth** (never a guard shortcut): `set`, `remove`, `config set`, `reveal`, `copy`.
-
-Live guard may satisfy `run` / `list` without a prompt. Guard IPC verbs: `run`, `list`, `lock`, `status`, `renew` only — **no** `get-value` / `reveal`.
-
-### Who decrypts
-
-| Path | Decryptor | What the agent-facing process gets |
-|------|-----------|--------------------------------------|
-| Interactive `run` | CLI | Scrubbed stdout/stderr + exit |
-| Non-interactive `run` | Helper (decrypts **and** executes) | Scrubbed stdout/stderr + exit |
-| Cached `run` | Guard | Scrubbed stdout/stderr + exit |
-| Non-interactive `reveal` / `copy` | Helper window only | Status flag (`shown` / `copied`) |
+Before a session expires, the guard asks *in its own window* whether to extend. No answer means it locks itself.
 
 ## Commands
 
-| Command | Notes |
-|---------|--------|
-| `set NAME [VALUE]` | Fresh auth; updates vault + names sidecar |
-| `remove NAME` | Fresh auth |
-| `run --secret/--as ... -- cmd` | Guard hit or per-call; buffer-then-scrub |
-| `list` | Names sidecar / guard; never values |
-| `unlock` / `lock` | Cached session control |
-| `reveal` / `copy` | Fresh auth; display/copy location follows TTY vs helper |
-| `config show` / `config set KEY VALUE` | `set` requires fresh auth |
-| `status` | Guard session info |
+| Command | What it does |
+|---------|--------------|
+| `ka set NAME` | Store or update a secret (value typed hidden; password required) |
+| `ka remove NAME` | Delete a secret (password required) |
+| `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. |
+| `ka list` | Show secret *names* only — never values; safe for agents, no prompt |
+| `ka unlock` / `ka lock` | Start / end a cached session |
+| `ka reveal NAME` | Show a value to *you* (password required every time, even mid-session) |
+| `ka copy NAME` | Copy a value to your clipboard instead of showing it (same rule) |
+| `ka config show` / `ka config set KEY VALUE` | View / change settings (changes require your password) |
+| `ka status` | Is a session active, and until when |
 
-Internal: `_prompt-helper`, `_guard` (bare argv; omitted from top-level help summary; still support `--help`).
+Every command supports `--help`.
 
-## Cryptography & files
+`reveal` and `copy` deserve a special note: even if an agent invokes them, the value appears **only in the pop-up window on your screen** (or your clipboard) — the agent's own process receives nothing but a status flag. And they *always* require a fresh password, session or no session — so an agent can never ride an open session into actually reading a value.
 
-- **KDF:** Argon2id `OPSLIMIT_SENSITIVE` / `MEMLIMIT_SENSITIVE` only (never dialed down).
-- **Vault:** `vault.bin` — `KAM1` header + SecretBox blob.
-- **Names sidecar:** `vault.names.json` — `{"names":[...]}` for prompt-free `list`.
-- **Config:** `session-mode`, `session-timeout-minutes`, `prompt-timeout-seconds`.
-- **Guard lock:** pipe address + `authkey_hex` + pid + expiry. **No `session_key`.**
-- **Audit:** `audit.log` JSONL — actions, names, routes, results; never secret values.
+## Under the hood
 
-## Threat model (honest)
+For the security-curious — the full detail lives in [DESIGN.md](DESIGN.md):
 
-Read this before relying on key-amnesia in a hostile environment.
+- **Encryption:** the vault is a single file sealed with XSalsa20-Poly1305 (libsodium's SecretBox) under a key derived from your master password via Argon2id at its most expensive (`SENSITIVE`) setting — deliberately slow to brute-force, and deliberately never dialed down.
+- **The routing rule:** any command needing your password checks whether it's running in a real terminal. Yes → asks right there. No (an agent invoked it) → spawns a fresh, isolated console window whose keyboard input can only come from you. No interactive session at all → fails closed, never falls back to something insecure.
+- **The guard never hands out secrets.** In cached mode, the guard *itself* runs your command with the secret injected and returns only the censored output and exit code. Its protocol simply has no "give me the value" request — so even another process connecting to it directly can't ask for one.
+- **Nothing sensitive on command lines.** Windows records process command lines in its audit logs (event 4688); key-amnesia passes all sensitive hand-off data between its own processes via environment variables instead.
+- **Audit log:** `~/.key-amnesia/audit.log`, append-only JSON lines — timestamp, action, secret names (never values), route, allowed/denied/timeout.
 
-1. **Residual scrubbing risk.** The target command can print the secret. Scrubbing mitigates **exact substring echoes only**. Base64, hex, chunked, or otherwise obfuscated echoes still slip through.
-2. **Output is not live.** Child stdout/stderr are fully buffered, scrubbed, then relayed. The agent sees output only after the command exits.
-3. **Secret names are plaintext on disk** via `vault.names.json`. Values are encrypted. DPAPI (or similar) protection of the sidecar is **out of scope for v0**.
-4. **Human console assumption.** We assume the invoking agent cannot GUI-automate or synthesize keystrokes against the spawned authentication console.
-5. **Headless / no interactive session.** Fail closed — there is no non-interactive way to supply the master password without a spawned console.
-6. **Same-user process isolation (ssh-agent parallel).** Any process running as the same user can talk to a live guard (authkey is in `guard.lock`). The guard **never returns raw secret values** — damage is bounded to `run` / `list` / session control — but this does **not** close the same-user gap.
-7. **Master password never on IPC** and is never satisfiable non-interactively without a spawned console.
+Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAULT_PATH`).
+
+## Security limits — read this part honestly
+
+No tool in this class can promise absolute secrecy, and we'd rather tell you exactly where the edges are:
+
+1. **A command you run can still leak its own secret.** Censoring catches exact copies of the value in output — a command that base64-encodes or otherwise obfuscates the secret before printing slips through. This limit is shared by every tool of this kind (`op run`, `teller run`).
+2. **Output is not live.** Command output is collected fully, censored, then released — the agent sees it only after the command finishes.
+3. **Secret *names* are stored in plain text** (so `ka list` can work without a password). Values never are. Treat names as non-sensitive labels.
+4. **The pop-up window assumes the agent can't control your screen.** If you've given an agent screen-reading *and* keyboard/mouse-injection powers, the window's isolation weakens — your typed password stays hidden, but a yes/no confirmation could theoretically be clicked by such an agent.
+5. **Headless machines fail closed.** No display → no way to approve → the operation is denied. By design.
+6. **Same-user processes share your privileges.** Any program running under your OS account can talk to a live guard session (this is equally true of `ssh-agent`). That's why the guard is designed to never return raw values — the worst a rogue same-user process gets is the same bounded "run a command" capability the legitimate path has.
+7. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
+8. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
 
 ## Development
 
@@ -115,7 +101,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-See [DESIGN.md](DESIGN.md) for formats, invariants, and module layout.
+Design rationale, file formats, invariants: [DESIGN.md](DESIGN.md).
 
 ## License
 
