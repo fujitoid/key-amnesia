@@ -47,3 +47,18 @@ desktop.ini
 .env.*
 *.pem
 *.key
+
+# Image-generation internals (brand recipe + manifest are Loom-pipeline working
+# files, not part of the product) - only approved images in media/assets/approved/
+# are committed. Generated drafts are also excluded.
+media/brand.yaml
+media/manifest.yaml
+media/assets/generated/
+
+# Accidental local vault/runtime artifacts in-repo
+.key-amnesia/
+vault.bin
+vault.names.json
+audit.log
+guard.lock
+
