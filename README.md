@@ -13,18 +13,23 @@ The agent gets amnesia. That's the whole point. And every access attempt — all
 ## How it works, in 30 seconds
 
 ```bash
-# 1. Store a secret (you type it once, hidden, into a password prompt)
+# 1. Create the vault (type the master password twice to confirm)
+ka init
+
+# 2. Store a secret (you type it once, hidden, into a password prompt)
 ka set OPENAI_API_KEY
 
-# 2. The agent runs commands THROUGH key-amnesia instead of holding the key:
+# 3. The agent runs commands THROUGH key-amnesia instead of holding the key:
 ka run --secret OPENAI_API_KEY --as OPENAI_API_KEY -- python my_script.py
 
-# 3. That's it. The script gets the real key in its environment.
+# 4. That's it. The script gets the real key in its environment.
 #    The agent sees the script's output — with any leaked key censored:
 #    "Bearer ***REDACTED(OPENAI_API_KEY)***"
 ```
 
-When the agent triggers step 2 and your approval is needed, you'll see a new console window appear with a clear message — *"An agent-driven command is requesting: run with secret OPENAI_API_KEY"* — and only your password, typed there, lets it proceed. Close the window to deny. Nothing the agent controls can type into that window.
+`ka init` asks for the master password twice; if the entries do not match, nothing is created. **There is no recovery** if you forget that password — Argon2id + SecretBox leave none by design.
+
+When the agent triggers step 3 and your approval is needed, you'll see a new console window appear with a clear message — *"An agent-driven command is requesting: run with secret OPENAI_API_KEY"* — and only your password, typed there, lets it proceed. Close the window to deny. Nothing the agent controls can type into that window.
 
 ## Install
 
@@ -55,7 +60,8 @@ Before a session expires, the guard asks *in its own window* whether to extend. 
 
 | Command | What it does |
 |---------|--------------|
-| `ka set NAME` | Store or update a secret (value typed hidden; password required) |
+| `ka init` | Create an empty vault (type master password twice; refuse if already exists) |
+| `ka set NAME` | Store or update a secret (value typed hidden; password required; vault must already exist) |
 | `ka remove NAME` | Delete a secret (password required) |
 | `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. |
 | `ka list` | Show secret *names* only — never values; safe for agents, no prompt |

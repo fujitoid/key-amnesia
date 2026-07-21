@@ -51,6 +51,8 @@ Payload JSON: `{"secrets": {...}, "created_at": "...", "updated_at": "..."}`.
 
 KDF: `argon2id.kdf` with **OPSLIMIT_SENSITIVE / MEMLIMIT_SENSITIVE only** (deliberate; never dial down). Dir `~/.key-amnesia/` with `0o700` on POSIX; Windows user-profile ACL defaults.
 
+**Creation is explicit, not implicit.** `ka init` is the only path that creates a vault: it requires an interactive TTY (refuses non-interactively — vault creation is never routed through the spawned-console/agent flow at all, unlike every other privileged command), prompts for the master password **twice**, and only writes the vault if both entries match exactly; a mismatch aborts with nothing created. `ka set` refuses with a clear error (`"Vault not initialized. Run 'ka init' first."`) if no vault exists yet — it never creates one as a side effect. This replaced an earlier v0 gap where the first `ka set` call silently created the vault from a single, unconfirmed password entry (a typo there was permanent and undetectable until the next unlock attempt failed, with no recovery path since Argon2id + SecretBox provide none by design).
+
 ### Names sidecar (prompt-free `list`)
 
 Whole-vault AEAD cannot list names without the password. Sidecar `~/.key-amnesia/vault.names.json` = `{"names":[...]}` updated on every successful `set`/`remove`.
@@ -154,7 +156,8 @@ Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`
 
 ## Commands
 
-- `set` / `remove` — fresh auth; mutate vault + names index
+- `init` — creates the vault; TTY-only (no agent-triggered path), double-confirms the master password, refuses if a vault already exists
+- `set` / `remove` — fresh auth; mutate vault + names index; `set` refuses if no vault exists yet rather than creating one implicitly
 - `run --secret/--as ... -- cmd` — guard hit or per-call decrypt path; buffer-then-scrub child stdout/stderr → `***REDACTED(name)***`
 - `list` — read names sidecar (no prompt); never values
 - `unlock` / `lock` — cached session control
@@ -192,4 +195,4 @@ The guard and helper IPC replies expose only: status, scrubbed stdout/stderr, ex
 
 ## Testing
 
-Vault round-trip / wrong password / tamper; scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help`; scrubber uses replace not regex.
+Vault round-trip / wrong password / tamper; `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex.

@@ -53,7 +53,7 @@ def test_help_top_level_and_subcommand() -> None:
         main(["--help"])
     assert ei.value.code == 0
 
-    for sub in ("set", "run", "list", "reveal", "copy", "config", "unlock", "lock"):
+    for sub in ("init", "set", "run", "list", "reveal", "copy", "config", "unlock", "lock"):
         with pytest.raises(SystemExit) as ei:
             main([sub, "--help"])
         assert ei.value.code == 0

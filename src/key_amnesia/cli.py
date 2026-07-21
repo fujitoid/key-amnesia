@@ -33,6 +33,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
+    # init
+    sub.add_parser(
+        "init",
+        help="Create an empty vault (double-confirm master password)",
+    )
+
     # set
     p_set = sub.add_parser("set", help="Store or update a secret (always fresh auth)")
     p_set.add_argument("name", help="Secret name")
@@ -121,10 +127,50 @@ def _parse_as_mappings(as_env: list[str]) -> dict[str, str]:
     return out
 
 
-def _ensure_vault_password_for_new(password: str) -> None:
+def _prompt_new_master_password() -> str | None:
+    """Prompt twice for a new master password; return it or None on failure."""
+    p1 = getpass.getpass("Master password: ")
+    p2 = getpass.getpass("Confirm master password: ")
+    if not p1:
+        print("Error: master password cannot be empty.", file=sys.stderr)
+        return None
+    if p1 != p2:
+        print(
+            "Error: passwords do not match — vault not created.",
+            file=sys.stderr,
+        )
+        return None
+    return p1
+
+
+def cmd_init(_args: argparse.Namespace) -> int:
     vp = vault_path()
-    if not vp.exists():
+    if vp.exists():
+        print(
+            "vault already initialized, use ka set to add secrets",
+            file=sys.stderr,
+        )
+        return 1
+    if not sys.stdin.isatty():
+        print(
+            "Error: ka init requires an interactive terminal "
+            "(run it directly in your console).",
+            file=sys.stderr,
+        )
+        return 1
+    password = _prompt_new_master_password()
+    if password is None:
+        return 1
+    try:
         save_vault(vp, password, empty_payload())
+    except VaultError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    print(f"Vault initialized at {vp}")
+    print(
+        "Remember your master password — it cannot be recovered if forgotten."
+    )
+    return 0
 
 
 def _auth_password(request: PromptRequest) -> tuple[bool, str | None, Any]:
@@ -142,6 +188,12 @@ def _auth_password(request: PromptRequest) -> tuple[bool, str | None, Any]:
 def cmd_set(args: argparse.Namespace) -> int:
     name = args.name
     value = args.value
+    if not vault_path().exists():
+        print(
+            "Vault not initialized. Run 'ka init' first.",
+            file=sys.stderr,
+        )
+        return 1
     # Prefer not putting secret values on argv — if omitted, prompt (inline only)
     request = PromptRequest(
         action="set",
@@ -159,10 +211,8 @@ def cmd_set(args: argparse.Namespace) -> int:
         if value is None:
             value = getpass.getpass(f"Value for '{name}': ")
         try:
-            _ensure_vault_password_for_new(password)
             payload = load_vault(None, password)
         except VaultError as e:
-            # New vault case already handled; wrong password:
             print(f"Error: {e}", file=sys.stderr)
             audit_event(
                 "set",
@@ -570,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_guard_main()
 
     handlers = {
+        "init": cmd_init,
         "set": cmd_set,
         "remove": cmd_remove,
         "run": cmd_run,
