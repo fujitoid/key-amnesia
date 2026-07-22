@@ -102,6 +102,171 @@ def _spawn_helper(
     return spawn_isolated_console(cmd, env, popen_fn=popen_fn)
 
 
+def _prompt_approve_inline(request: PromptRequest) -> bool:
+    theme.info(
+        "key-amnesia: browser fill approval required",
+        file=sys.stderr,
+    )
+    try:
+        detail = json.loads(request.detail) if request.detail else {}
+    except json.JSONDecodeError:
+        detail = {}
+    url = str(detail.get("url") or request.detail or "")
+    usernames = detail.get("usernames") or []
+    secret_names = detail.get("secret_names") or request.secret_names
+    if url:
+        theme.info(f"  site: {url}", file=sys.stderr)
+    if usernames:
+        theme.info(f"  usernames: {', '.join(str(u) for u in usernames)}", file=sys.stderr)
+    if secret_names:
+        theme.info(
+            f"  secret names: {', '.join(str(n) for n in secret_names)}",
+            file=sys.stderr,
+        )
+    theme.info("  (passwords are never shown here)", file=sys.stderr)
+    ans = input("Allow fill? [y/N] ").strip().lower()
+    return ans in ("y", "yes")
+
+
+def require_browser_fill_approval(
+    request: PromptRequest,
+    timeout_s: int | None = None,
+    *,
+    approve_provider: Callable[[], bool] | None = None,
+    popen_fn: Callable[..., Any] | None = None,
+    isatty_fn: Callable[[], bool] | None = None,
+) -> AuthOutcome:
+    """Yes/No approval for browser fill — never collects a master password.
+
+    Used only when a live unlock/fill session already holds the vault.
+    """
+    if request.action != "browser-fill-approve":
+        request = PromptRequest(
+            action="browser-fill-approve",
+            secret_names=request.secret_names,
+            command=request.command,
+            inject_as=request.inject_as,
+            detail=request.detail,
+            vault_path=request.vault_path,
+        )
+
+    cfg = load_config()
+    if timeout_s is None:
+        timeout_s = int(cfg.get("prompt-timeout-seconds", 90))
+
+    tty = (isatty_fn or _isatty)()
+    if tty:
+        try:
+            if approve_provider is not None:
+                approved = bool(approve_provider())
+            else:
+                approved = _prompt_approve_inline(request)
+        except (EOFError, KeyboardInterrupt):
+            return AuthOutcome(
+                ok=False,
+                route="inline",
+                reason="approval cancelled",
+                status_only={"approved": False, "action": "browser-fill-approve"},
+            )
+        return AuthOutcome(
+            ok=approved,
+            route="inline",
+            reason="" if approved else "denied",
+            status_only={"approved": approved, "action": "browser-fill-approve"},
+        )
+
+    # Non-interactive: spawn helper console for yes/no only (no password).
+    listener = None
+    proc = None
+    try:
+        listener, address, authkey = ipc.start_listener()
+        try:
+            proc = _spawn_helper(
+                request, address, authkey, timeout_s, popen_fn=popen_fn
+            )
+        except OSError as e:
+            return AuthOutcome(ok=False, route="spawned-console", reason=str(e))
+
+        deadline = time.monotonic() + timeout_s
+        conn: Connection | None = None
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            accepted: list[Connection | BaseException] = []
+
+            def _accept() -> None:
+                try:
+                    accepted.append(listener.accept())
+                except BaseException as exc:  # noqa: BLE001
+                    accepted.append(exc)
+
+            t = threading.Thread(target=_accept, daemon=True)
+            t.start()
+            t.join(timeout=min(1.0, max(0.1, remaining)))
+            if accepted:
+                item = accepted[0]
+                if isinstance(item, BaseException):
+                    raise item
+                conn = item
+                break
+            if proc.poll() is not None:
+                break
+        else:
+            return AuthOutcome(
+                ok=False, route="spawned-console", reason="approval timed out"
+            )
+
+        if conn is None:
+            return AuthOutcome(
+                ok=False,
+                route="spawned-console",
+                reason="helper exited without connecting",
+            )
+
+        try:
+            remaining = max(0.1, deadline - time.monotonic())
+            reply = ipc.recv_msg(conn, timeout=remaining)
+        except TimeoutError:
+            return AuthOutcome(
+                ok=False, route="spawned-console", reason="helper reply timed out"
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        if "password" in reply or "secret_value" in reply or "secrets" in reply:
+            reply = {
+                k: v
+                for k, v in reply.items()
+                if k not in ("password", "secret_value", "secrets")
+            }
+
+        so = reply.get("status_only") if isinstance(reply.get("status_only"), dict) else {}
+        approved = bool(so.get("approved")) if "approved" in so else bool(reply.get("ok"))
+        reason = str(reply.get("reason", ""))
+        return AuthOutcome(
+            ok=approved,
+            route="spawned-console",
+            reason=reason if not approved else "",
+            status_only={
+                "approved": approved,
+                "action": "browser-fill-approve",
+            },
+        )
+    finally:
+        if listener is not None:
+            try:
+                listener.close()
+            except Exception:
+                pass
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+
 def require_human_auth(
     request: PromptRequest,
     timeout_s: int | None = None,
@@ -269,7 +434,7 @@ def require_human_auth(
             outcome.status_only = {
                 k: v
                 for k, v in reply["status_only"].items()
-                if k in ("shown", "copied", "action", "name")
+                if k in ("shown", "copied", "action", "name", "approved", "key")
             }
         return outcome
     finally:
@@ -400,6 +565,66 @@ def run_prompt_helper() -> int:
     watcher = threading.Thread(target=_watch, daemon=True)
     watcher.start()
 
+    reply: dict[str, Any] = {"ok": False, "reason": ""}
+
+    # Browser-fill approval: yes/no only — never collect a master password.
+    if request.action == "browser-fill-approve":
+        try:
+            detail = json.loads(request.detail) if request.detail else {}
+        except json.JSONDecodeError:
+            detail = {}
+        url = str(detail.get("url") or "")
+        usernames = detail.get("usernames") or []
+        secret_names = detail.get("secret_names") or request.secret_names
+        theme.info("Browser fill approval (no password required)")
+        if url:
+            theme.out(f"Site     : {url}")
+        if usernames:
+            theme.out(f"Usernames: {', '.join(str(u) for u in usernames)}")
+        if secret_names:
+            theme.out(f"Secrets  : {', '.join(str(n) for n in secret_names)}")
+        theme.out("(Password values are never shown.)")
+        theme.out()
+        try:
+            ans = input("Allow fill? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if cancel["flag"]:
+            theme.error("Cancelled (parent exited).")
+            return 1
+        approved = ans in ("y", "yes")
+        reply["ok"] = approved
+        reply["reason"] = "" if approved else "denied"
+        reply["status_only"] = {
+            "approved": approved,
+            "action": "browser-fill-approve",
+        }
+        try:
+            if parent_pid and not parent_alive(parent_pid):
+                theme.error("Parent gone; discarding reply.")
+                return 1
+            conn = ipc.connect(address, authkey)
+            try:
+                safe = {
+                    k: v
+                    for k, v in reply.items()
+                    if k in ("ok", "reason", "run_result", "status_only")
+                }
+                ipc.send_msg(conn, safe)
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            theme.error(f"Failed to reply to parent: {e}")
+            input("Press Enter to close...")
+            return 1
+        cancel["flag"] = True
+        if approved:
+            theme.success("Approved.")
+        else:
+            theme.out("Denied.")
+        time.sleep(0.8)
+        return 0 if approved else 1
+
     try:
         password = getpass.getpass("Master password: ")
     except (EOFError, KeyboardInterrupt):
@@ -408,8 +633,6 @@ def run_prompt_helper() -> int:
     if cancel["flag"]:
         theme.error("Cancelled (parent exited).")
         return 1
-
-    reply: dict[str, Any] = {"ok": False, "reason": ""}
 
     try:
         if not password:
@@ -509,6 +732,12 @@ def run_prompt_helper() -> int:
                                 password,
                                 {
                                     "secrets": secrets_map,
+                                    "logins": payload.get("logins") or [],
+                                    "browser_associations": payload.get(
+                                        "browser_associations"
+                                    )
+                                    or [],
+                                    "database_id": payload.get("database_id") or "",
                                     "created_at": payload.get("created_at"),
                                     "updated_at": payload.get("updated_at"),
                                 },
@@ -531,6 +760,12 @@ def run_prompt_helper() -> int:
                                 password,
                                 {
                                     "secrets": secrets_map,
+                                    "logins": payload.get("logins") or [],
+                                    "browser_associations": payload.get(
+                                        "browser_associations"
+                                    )
+                                    or [],
+                                    "database_id": payload.get("database_id") or "",
                                     "created_at": payload.get("created_at"),
                                     "updated_at": payload.get("updated_at"),
                                 },

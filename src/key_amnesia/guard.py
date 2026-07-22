@@ -3,6 +3,9 @@
 IPC verbs: run, list, lock, status, renew only.
 Never returns raw secret values. No get-value / reveal verb.
 Authkey only (no session_key).
+
+Co-hosts browser-fill as a second Listener in the same child; both die on
+lock / expiry.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,6 +24,13 @@ from typing import Any
 from key_amnesia import ipc
 from key_amnesia import theme
 from key_amnesia.audit import audit_event
+from key_amnesia.browser_fill import (
+    FillState,
+    clear_browser_fill_lock,
+    fill_serve,
+    start_fill_listener,
+    write_browser_fill_lock,
+)
 from key_amnesia.paths import guard_lock_path
 from key_amnesia.run_exec import run_with_secrets
 from key_amnesia.vault import read_names
@@ -33,6 +44,10 @@ class GuardState:
     authkey: bytes
     pid: int = field(default_factory=os.getpid)
     created_at: float = field(default_factory=time.time)
+    stop: threading.Event = field(default_factory=threading.Event)
+    # Shared with fill listener (same process); renew updates expires_at.
+    fill_state: FillState | None = None
+
 
 
 def _utc_iso(ts: float | None = None) -> str:
@@ -155,6 +170,7 @@ def guard_handle_message(msg: dict[str, Any], state: GuardState) -> dict[str, An
 
     if verb == "lock":
         audit_event("lock", route="guard-session", result="allowed")
+        state.stop.set()
         return {"ok": True, "lock": True}
 
     if verb == "renew":
@@ -163,6 +179,14 @@ def guard_handle_message(msg: dict[str, Any], state: GuardState) -> dict[str, An
             return {"ok": False, "reason": "invalid minutes"}
         state.expires_at = time.time() + minutes * 60
         write_guard_lock(state.address, state.authkey, state.pid, state.expires_at)
+        if state.fill_state is not None:
+            state.fill_state.expires_at = state.expires_at
+            write_browser_fill_lock(
+                state.fill_state.address,
+                state.fill_state.authkey,
+                state.pid,
+                state.expires_at,
+            )
         audit_event(
             "renew",
             route="guard-session",
@@ -228,7 +252,7 @@ def guard_handle_message(msg: dict[str, Any], state: GuardState) -> dict[str, An
 def guard_serve(state: GuardState, listener: Any) -> None:
     """Main guard loop: accept connections until lock or expiry."""
     extend_prompted = False
-    while True:
+    while not state.stop.is_set():
         now = time.time()
         # ~2 min before expiry: prompt extend if TTY still interactive
         if (
@@ -251,11 +275,20 @@ def guard_serve(state: GuardState, listener: Any) -> None:
                     write_guard_lock(
                         state.address, state.authkey, state.pid, state.expires_at
                     )
+                    if state.fill_state is not None:
+                        state.fill_state.expires_at = state.expires_at
+                        write_browser_fill_lock(
+                            state.fill_state.address,
+                            state.fill_state.authkey,
+                            state.pid,
+                            state.expires_at,
+                        )
                     extend_prompted = False
             except (EOFError, KeyboardInterrupt):
                 pass
 
         if now > state.expires_at:
+            state.stop.set()
             break
 
         # Accept with short poll via thread-less approach: use listener
@@ -271,17 +304,15 @@ def guard_serve(state: GuardState, listener: Any) -> None:
             except Exception as e:  # noqa: BLE001
                 accepted.append(e)
 
-        import threading
-
         t = threading.Thread(target=_accept, daemon=True)
         t.start()
         while t.is_alive():
-            if time.time() > state.expires_at:
+            if state.stop.is_set() or time.time() > state.expires_at:
                 break
             t.join(timeout=0.5)
         if not accepted:
-            # Timed out waiting / expired
-            if time.time() > state.expires_at:
+            # Timed out waiting / expired / stop
+            if state.stop.is_set() or time.time() > state.expires_at:
                 break
             continue
         item = accepted[0]
@@ -293,6 +324,7 @@ def guard_serve(state: GuardState, listener: Any) -> None:
             reply = guard_handle_message(msg, state)
             ipc.send_msg(conn, reply)
             if reply.get("lock"):
+                state.stop.set()
                 break
         except Exception:
             pass
@@ -302,9 +334,14 @@ def guard_serve(state: GuardState, listener: Any) -> None:
             except Exception:
                 pass
 
+    state.stop.set()
     # Wipe secrets from state
     state.secrets.clear()
+    if state.fill_state is not None:
+        state.fill_state.secrets.clear()
+        state.fill_state.stop.set()
     clear_guard_lock()
+    clear_browser_fill_lock()
     try:
         listener.close()
     except Exception:
@@ -315,10 +352,14 @@ def start_guard_process(payload: dict[str, Any], timeout_minutes: int) -> int:
     """Start guard in a child process holding decrypted secrets.
 
     Returns child PID. Writes guard.lock (authkey only — no session_key).
+    Also starts browser-fill Listener in the same child (browser_fill.lock).
     """
     import subprocess
 
     secrets_map = {k: str(v) for k, v in payload.get("secrets", {}).items()}
+    logins = list(payload.get("logins") or [])
+    associations = list(payload.get("browser_associations") or [])
+    database_id = str(payload.get("database_id") or "")
     # Pass secrets to child via a one-shot pipe file that child deletes —
     # NOT on argv. Use env with a temp file path.
     import tempfile
@@ -360,6 +401,9 @@ def start_guard_process(payload: dict[str, Any], timeout_minutes: int) -> int:
         json.dump(
             {
                 "secrets": secrets_map,
+                "logins": logins,
+                "browser_associations": associations,
+                "database_id": database_id,
                 "expires_at": expires_at,
                 "timeout_minutes": timeout_minutes,
             },
@@ -389,7 +433,19 @@ def start_guard_process(payload: dict[str, Any], timeout_minutes: int) -> int:
         deadline = time.time() + 15
         while time.time() < deadline:
             lock = read_guard_lock()
-            if lock and int(lock.get("pid") or 0) == proc.pid:
+            fill_lock = None
+            try:
+                from key_amnesia.browser_fill import read_browser_fill_lock
+
+                fill_lock = read_browser_fill_lock()
+            except Exception:
+                fill_lock = None
+            if (
+                lock
+                and int(lock.get("pid") or 0) == proc.pid
+                and fill_lock
+                and int(fill_lock.get("pid") or 0) == proc.pid
+            ):
                 return proc.pid
             if proc.poll() is not None:
                 raise RuntimeError("guard process exited before writing lock")
@@ -401,7 +457,7 @@ def start_guard_process(payload: dict[str, Any], timeout_minutes: int) -> int:
 
 
 def run_guard_main() -> int:
-    """Entry for `_guard`: read bootstrap env, serve, exit."""
+    """Entry for `_guard`: read bootstrap env, serve guard + fill, exit."""
     boot_path = os.environ.pop("KEY_AMNESIA_GUARD_BOOTSTRAP", "")
     if not boot_path:
         theme.error("guard: missing bootstrap")
@@ -416,20 +472,55 @@ def run_guard_main() -> int:
             pass
 
     secrets_map = {k: str(v) for k, v in boot.get("secrets", {}).items()}
+    logins = list(boot.get("logins") or [])
+    associations = list(boot.get("browser_associations") or [])
+    database_id = str(boot.get("database_id") or "")
     expires_at = float(boot["expires_at"])
+    stop = threading.Event()
+
     listener, address, authkey = ipc.start_listener()
+    fill_listener, fill_address, fill_authkey = start_fill_listener()
     pid = os.getpid()
-    write_guard_lock(address, authkey, pid, expires_at)
+
+    fill_state = FillState(
+        secrets=secrets_map,
+        logins=logins,
+        browser_associations=associations,
+        database_id=database_id,
+        expires_at=expires_at,
+        address=fill_address,
+        authkey=fill_authkey,
+        pid=pid,
+        stop=stop,
+    )
     state = GuardState(
         secrets=secrets_map,
         expires_at=expires_at,
         address=address,
         authkey=authkey,
         pid=pid,
+        stop=stop,
+        fill_state=fill_state,
     )
+    write_guard_lock(address, authkey, pid, expires_at)
+    write_browser_fill_lock(fill_address, fill_authkey, pid, expires_at)
+
+    fill_thread = threading.Thread(
+        target=fill_serve,
+        args=(fill_state, fill_listener),
+        daemon=True,
+    )
+    fill_thread.start()
     try:
         guard_serve(state, listener)
     finally:
+        stop.set()
         state.secrets.clear()
+        fill_state.secrets.clear()
         clear_guard_lock()
+        clear_browser_fill_lock()
+        try:
+            fill_listener.close()
+        except Exception:
+            pass
     return 0

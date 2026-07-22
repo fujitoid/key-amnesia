@@ -21,6 +21,7 @@ dev = ["pytest>=7.0"]
 [project.scripts]
 key-amnesia = "key_amnesia.cli:main"
 ka = "key_amnesia.cli:main"
+key-amnesia-browser-host = "key_amnesia.native_host:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
