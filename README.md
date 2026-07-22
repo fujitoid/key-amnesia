@@ -100,6 +100,10 @@ No tool in this class can promise absolute secrecy, and we'd rather tell you exa
 7. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
 8. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
 
+## CLI appearance
+
+On a real terminal, status lines use a restrained brand palette (teal for info/success, amber for warnings, red only for hard denials). Set `NO_COLOR` or redirect output to a pipe/file and all ANSI escapes are omitted — agent-facing and scrubbed paths stay plain text. Glyphs fall back to ASCII (`[OK]` / `[DENIED]` / `[LOCKED]`) when color or unicode is unavailable. Scrubbed command output and raw revealed secret values are never styled.
+
 ## Development
 
 ```bash
