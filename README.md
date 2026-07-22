@@ -68,12 +68,25 @@ Before a session expires, the guard asks *in its own window* whether to extend. 
 | `ka unlock` / `ka lock` | Start / end a cached session |
 | `ka reveal NAME` | Show a value to *you* (password required every time, even mid-session) |
 | `ka copy NAME` | Copy a value to your clipboard instead of showing it (same rule) |
+| `ka login …` | Manage URL/username ↔ secret associations for browser fill — see [Managing logins](#managing-logins) |
 | `ka config show` / `ka config set KEY VALUE` | View / change settings (changes require your password) |
 | `ka status` | Is a session active, and until when |
 
 Every command supports `--help`.
 
 `reveal` and `copy` deserve a special note: even if an agent invokes them, the value appears **only in the pop-up window on your screen** (or your clipboard) — the agent's own process receives nothing but a status flag. And they *always* require a fresh password, session or no session — so an agent can never ride an open session into actually reading a value.
+
+### Managing logins
+
+Browser fill looks up which vault secret to use for a site via **login associations** — a URL, username, and existing secret name. Create and manage them only from the CLI (the extension's `set-login` path is stubbed in v2; the CLI is the only create path):
+
+```text
+ka login add <url> <username> <secret-name>
+ka login list
+ka login remove <url> <username>
+```
+
+Each of these always asks for your master password (fresh auth — never a cached session shortcut). `list` prints `url`, `username`, and `secret_name` only — never password values. The named secret must already exist (`ka set` it first) before you can `login add` it.
 
 ## Under the hood
 

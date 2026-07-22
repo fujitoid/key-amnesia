@@ -159,7 +159,7 @@ Master password never appears on this channel in any form. Master password is ne
 - **per-call (default):** no persistent guard; each privileged op goes through password routing; discard after use.
 - **cached:** `unlock` starts guard holding decrypted vault; timeout from unlock; ~2 min before expiry prompt extend on guard’s TTY if still interactive; `lock` tears down. Live guard → `run`/`list` skip prompt.
 
-Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`, `remove`, `config set`, and **`set`**.
+Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`, `remove`, `config set`, **`set`**, and **`login add` / `login list` / `login remove`**.
 
 ---
 
@@ -171,6 +171,10 @@ Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`
 - `list` — read names sidecar (no prompt); never values
 - `unlock` / `lock` — cached session control
 - `reveal` / `copy` — always fresh auth; display location follows TTY vs helper rule
+- `login add <url> <username> <secret-name>` — fresh auth; associate an existing secret with a site/username (secret must already exist)
+- `login list` — fresh auth; print url/username/secret_name only (never password values); no prompt-free sidecar
+- `login remove <url> <username>` — fresh auth; drop that association
+- Extension `set-login` is stubbed in v2 — CLI `login add` is the only create path
 - `config set session-mode|session-timeout-minutes` — always fresh auth
 - `_prompt-helper` — internal; bare argv + env handoff; omitted from top-level summary, still supports `--help`
 
