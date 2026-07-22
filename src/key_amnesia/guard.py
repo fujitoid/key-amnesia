@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from key_amnesia import ipc
+from key_amnesia import theme
 from key_amnesia.audit import audit_event
 from key_amnesia.paths import guard_lock_path
 from key_amnesia.run_exec import run_with_secrets
@@ -238,10 +239,12 @@ def guard_serve(state: GuardState, listener: Any) -> None:
         ):
             extend_prompted = True
             try:
-                ans = input(
+                theme.out(
                     f"key-amnesia guard: session expires in "
-                    f"{int(state.expires_at - now)}s. Extend? [y/N] "
-                ).strip().lower()
+                    f"{int(state.expires_at - now)}s. Extend? [y/N] ",
+                    end="",
+                )
+                ans = input().strip().lower()
                 if ans in ("y", "yes"):
                     # Default extend by original remaining window or 30m
                     state.expires_at = time.time() + 30 * 60
@@ -401,7 +404,7 @@ def run_guard_main() -> int:
     """Entry for `_guard`: read bootstrap env, serve, exit."""
     boot_path = os.environ.pop("KEY_AMNESIA_GUARD_BOOTSTRAP", "")
     if not boot_path:
-        print("guard: missing bootstrap", file=sys.stderr)
+        theme.error("guard: missing bootstrap")
         return 1
     try:
         with open(boot_path, encoding="utf-8") as f:

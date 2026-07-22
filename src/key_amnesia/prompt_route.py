@@ -17,8 +17,10 @@ from multiprocessing.connection import Connection
 from typing import Any, Callable
 
 from key_amnesia import ipc
+from key_amnesia import theme
 from key_amnesia.audit import audit_event
 from key_amnesia.config import load_config
+from key_amnesia.platform import spawn_isolated_console
 
 # Environment keys for helper handoff (never put these on argv).
 ENV_REQUEST = "KEY_AMNESIA_PROMPT_REQUEST"
@@ -63,11 +65,14 @@ def _isatty() -> bool:
 
 
 def _prompt_password_inline(request: PromptRequest) -> str:
-    print(f"key-amnesia: authentication required for '{request.action}'", file=sys.stderr)
+    theme.info(
+        f"key-amnesia: authentication required for '{request.action}'",
+        file=sys.stderr,
+    )
     if request.secret_names:
-        print(f"  secrets: {', '.join(request.secret_names)}", file=sys.stderr)
+        theme.info(f"  secrets: {', '.join(request.secret_names)}", file=sys.stderr)
     if request.detail:
-        print(f"  {request.detail}", file=sys.stderr)
+        theme.info(f"  {request.detail}", file=sys.stderr)
     return getpass.getpass("Master password: ")
 
 
@@ -86,14 +91,6 @@ def _spawn_helper(
     popen_fn: Callable[..., Any] | None = None,
 ) -> Any:
     """Spawn helper with CREATE_NEW_CONSOLE; sensitive data only in env."""
-    import subprocess
-
-    if sys.platform != "win32":
-        raise OSError(
-            "Non-interactive prompt spawn is Windows-only in v0; "
-            "POSIX console spawn is out of scope. Fail closed."
-        )
-
     env = os.environ.copy()
     env[ENV_REQUEST] = json.dumps(asdict(request))
     env[ENV_AUTHKEY] = ipc.authkey_to_hex(authkey)
@@ -101,16 +98,8 @@ def _spawn_helper(
     env[ENV_PARENT_PID] = str(os.getpid())
     env[ENV_TIMEOUT] = str(timeout_s)
 
-    creationflags = subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
     cmd = _helper_command()
-    popen = popen_fn or subprocess.Popen
-    # No stdin/stdout/stderr kwargs — new console owns stdio.
-    return popen(
-        cmd,
-        env=env,
-        creationflags=creationflags,
-        close_fds=False,
-    )
+    return spawn_isolated_console(cmd, env, popen_fn=popen_fn)
 
 
 def require_human_auth(
@@ -356,7 +345,7 @@ def run_prompt_helper() -> int:
         parent_pid = int(env.get(ENV_PARENT_PID, "0"))
         timeout_s = int(env.get(ENV_TIMEOUT, "90"))
     except (KeyError, ValueError) as e:
-        print(f"key-amnesia helper: missing/invalid env handoff: {e}", file=sys.stderr)
+        theme.error(f"key-amnesia helper: missing/invalid env handoff: {e}")
         input("Press Enter to close...")
         return 1
 
@@ -383,20 +372,20 @@ def run_prompt_helper() -> int:
     )
 
     if parent_pid and not parent_alive(parent_pid):
-        print("key-amnesia helper: parent process gone; cancelling.", file=sys.stderr)
+        theme.error("key-amnesia helper: parent process gone; cancelling.")
         return 1
 
-    print("=" * 50)
-    print("  key-amnesia — human authentication")
-    print("=" * 50)
-    print(f"Action : {request.action}")
+    theme.info("=" * 50)
+    theme.info("  key-amnesia — human authentication")
+    theme.info("=" * 50)
+    theme.out(f"Action : {request.action}")
     if request.secret_names:
-        print(f"Secrets: {', '.join(request.secret_names)}")
+        theme.out(f"Secrets: {', '.join(request.secret_names)}")
     if request.command:
-        print(f"Command: {' '.join(request.command)}")
+        theme.out(f"Command: {' '.join(request.command)}")
     if request.detail:
-        print(request.detail)
-    print()
+        theme.out(request.detail)
+    theme.out()
 
     # Watch parent in background
     cancel = {"flag": False}
@@ -417,7 +406,7 @@ def run_prompt_helper() -> int:
         password = ""
 
     if cancel["flag"]:
-        print("Cancelled (parent exited).", file=sys.stderr)
+        theme.error("Cancelled (parent exited).")
         return 1
 
     reply: dict[str, Any] = {"ok": False, "reason": ""}
@@ -467,10 +456,11 @@ def run_prompt_helper() -> int:
                     if name not in secrets_map:
                         reply["reason"] = f"unknown secret: {name}"
                     else:
-                        print()
-                        print(f"--- {name} ---")
-                        print(secrets_map[name])
-                        print("--- end ---")
+                        theme.out()
+                        theme.out(f"--- {name} ---")
+                        # Raw secret value — never themed.
+                        sys.stdout.write(f"{secrets_map[name]}\n")
+                        theme.out("--- end ---")
                         reply["ok"] = True
                         reply["status_only"] = {
                             "shown": True,
@@ -484,7 +474,7 @@ def run_prompt_helper() -> int:
                         reply["reason"] = f"unknown secret: {name}"
                     else:
                         copy_to_clipboard(secrets_map[name])
-                        print(f"Copied '{name}' to clipboard (this window only).")
+                        theme.success(f"Copied '{name}' to clipboard (this window only).")
                         reply["ok"] = True
                         reply["status_only"] = {
                             "copied": True,
@@ -586,7 +576,7 @@ def run_prompt_helper() -> int:
     # Connect back to parent and send status-only reply.
     try:
         if parent_pid and not parent_alive(parent_pid):
-            print("Parent gone; discarding reply.", file=sys.stderr)
+            theme.error("Parent gone; discarding reply.")
             return 1
         conn = ipc.connect(address, authkey)
         try:
@@ -607,15 +597,15 @@ def run_prompt_helper() -> int:
         finally:
             conn.close()
     except Exception as e:  # noqa: BLE001
-        print(f"Failed to reply to parent: {e}", file=sys.stderr)
+        theme.error(f"Failed to reply to parent: {e}")
         input("Press Enter to close...")
         return 1
 
     cancel["flag"] = True
     if reply.get("ok"):
-        print("Done.")
+        theme.success("Done.")
     else:
-        print(f"Failed: {reply.get('reason', 'unknown')}")
+        theme.out(f"Failed: {reply.get('reason', 'unknown')}")
     # Brief pause so user can read the console before it closes.
     time.sleep(0.8)
     return 0 if reply.get("ok") else 1
