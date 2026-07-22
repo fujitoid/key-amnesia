@@ -28,6 +28,12 @@ def _fake_which(available: dict[str, str]):
     return which
 
 
+@pytest.fixture(autouse=True)
+def _no_poll_delay(monkeypatch):
+    """Skip the real post-spawn liveness pause so this suite stays fast."""
+    monkeypatch.setattr("key_amnesia.platform._POLL_DELAY_S", 0)
+
+
 def test_linux_prefers_x_terminal_emulator(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("DISPLAY", ":0")
@@ -47,7 +53,9 @@ def test_linux_prefers_x_terminal_emulator(monkeypatch) -> None:
     def fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["kwargs"] = kwargs
-        return MagicMock()
+        proc = MagicMock()
+        proc.poll.return_value = None  # still running
+        return proc
 
     spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
 
@@ -82,7 +90,9 @@ def test_linux_falls_through_to_gnome_terminal(monkeypatch) -> None:
     def fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["kwargs"] = kwargs
-        return MagicMock()
+        proc = MagicMock()
+        proc.poll.return_value = None  # still running
+        return proc
 
     spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
 
@@ -109,10 +119,63 @@ def test_linux_konsole_and_xterm_wiring(monkeypatch) -> None:
 
         def fake_popen(cmd, **kwargs):
             captured["cmd"] = cmd
-            return MagicMock()
+            proc = MagicMock()
+            proc.poll.return_value = None  # still running
+            return proc
 
         spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
         assert captured["cmd"] == [path, "-e", *HELPER_ARGV]
+
+
+def test_linux_emulator_exits_immediately_falls_through(monkeypatch) -> None:
+    """A found emulator that dies right after spawn is not reported as success."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which(
+            {
+                "x-terminal-emulator": "/usr/bin/x-terminal-emulator",
+                "gnome-terminal": "/usr/bin/gnome-terminal",
+            }
+        ),
+    )
+    captured: dict[str, Any] = {"cmds": []}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmds"].append(cmd)
+        proc = MagicMock()
+        if cmd[0] == "/usr/bin/x-terminal-emulator":
+            proc.poll.return_value = 1  # exited immediately (bad flag / broken alias)
+        else:
+            proc.poll.return_value = None  # gnome-terminal stays running
+        return proc
+
+    result = spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
+
+    assert [c[0] for c in captured["cmds"]] == [
+        "/usr/bin/x-terminal-emulator",
+        "/usr/bin/gnome-terminal",
+    ]
+    assert result.poll() is None
+
+
+def test_linux_all_emulators_exit_immediately_fail_closed(monkeypatch) -> None:
+    """If every found emulator dies right after spawn, fail closed with a clear reason."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({"xterm": "/usr/bin/xterm"}),
+    )
+
+    def fake_popen(cmd, **kwargs):
+        proc = MagicMock()
+        proc.poll.return_value = 1  # exited immediately
+        return proc
+
+    with pytest.raises(OSError, match="none stayed running|Fail closed"):
+        spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
 
 
 def test_linux_headless_fail_closed(monkeypatch) -> None:
