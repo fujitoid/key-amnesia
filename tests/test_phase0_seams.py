@@ -56,11 +56,13 @@ def test_login_cli_wired(monkeypatch, password, seeded_vault, capsys) -> None:
     assert "No login associations." in (captured.out + captured.err)
 
 
-def test_browser_fill_cli_stub(capsys) -> None:
+def test_browser_fill_cli_wired(capsys) -> None:
+    """WS-B fills install/status; seam must dispatch (not the Phase 0 stub)."""
     rc = main(["browser-fill", "status"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "not implemented" in err.lower() or "Phase 0" in err
+    assert rc in (0, 1)
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "not implemented" not in out.lower()
 
 
 def test_native_host_exits_cleanly_on_eof() -> None:
