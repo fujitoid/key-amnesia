@@ -7,7 +7,9 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Callable, TextIO
+
+from key_amnesia import theme
 
 # Linux X11/Wayland terminal emulators, tried in order (first on PATH wins).
 _LINUX_EMULATORS: tuple[str, ...] = (
@@ -15,6 +17,23 @@ _LINUX_EMULATORS: tuple[str, ...] = (
     "gnome-terminal",
     "konsole",
     "xterm",
+)
+
+_LINUX_EMULATOR_DESCRIPTIONS: dict[str, str] = {
+    "x-terminal-emulator": "uses your distro's configured default terminal",
+    "gnome-terminal": "full-featured, best if you're on GNOME",
+    "konsole": "full-featured, best if you're on KDE",
+    "xterm": "lightest and fastest, no desktop-environment dependencies",
+}
+
+# Package-manager detection order (first on PATH wins).
+_PKG_MANAGERS: tuple[tuple[str, str], ...] = (
+    ("apt-get", "sudo apt-get install {pkg}"),
+    ("apt", "sudo apt install {pkg}"),
+    ("dnf", "sudo dnf install {pkg}"),
+    ("pacman", "sudo pacman -S {pkg}"),
+    ("apk", "sudo apk add {pkg}"),
+    ("zypper", "sudo zypper install {pkg}"),
 )
 
 # Brief pause after spawn to catch an emulator that launches then exits right
@@ -52,18 +71,42 @@ def _process_alive(proc: Any) -> bool:
         return True
 
 
-def _spawn_linux(
+def _no_emulator_oserror() -> OSError:
+    return OSError(
+        "No suitable terminal emulator found "
+        f"(tried {', '.join(_LINUX_EMULATORS)}). Fail closed."
+    )
+
+
+def _open_controlling_tty() -> TextIO | None:
+    """Open the controlling terminal, or None if unavailable."""
+    try:
+        return open("/dev/tty", "r+", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _tty_readline(tty: TextIO, prompt: str) -> str:
+    tty.write(prompt)
+    tty.flush()
+    return tty.readline().strip()
+
+
+def _pkg_install_command(package: str) -> str | None:
+    """Return a one-line install command for *package*, or None if unknown pm."""
+    for binary, template in _PKG_MANAGERS:
+        if shutil.which(binary):
+            return template.format(pkg=package)
+    return None
+
+
+def _try_spawn_linux_emulators(
     argv: list[str],
     env: dict[str, str],
     *,
     popen_fn: Callable[..., Any],
-) -> Any:
-    if not _has_interactive_display():
-        raise OSError(
-            "No interactive display available (DISPLAY/WAYLAND_DISPLAY unset); "
-            "cannot spawn isolated console. Fail closed."
-        )
-
+) -> tuple[Any | None, list[str]]:
+    """Try each known emulator on PATH. Return (proc_or_None, names_tried)."""
     tried: list[str] = []
     for name in _LINUX_EMULATORS:
         path = shutil.which(name)
@@ -79,20 +122,113 @@ def _spawn_linux(
         if _POLL_DELAY_S:
             time.sleep(_POLL_DELAY_S)
         if _process_alive(proc):
-            return proc
+            return proc, tried
         # Launched but exited immediately (bad invocation, broken alias) —
         # don't report false success; try the next emulator instead.
         continue
+    return None, tried
+
+
+def _offer_linux_emulator_install(
+    argv: list[str],
+    env: dict[str, str],
+    *,
+    popen_fn: Callable[..., Any],
+) -> Any | None:
+    """Interactive /dev/tty recovery when no emulator is on PATH.
+
+    Returns a live process if the user installs and retry succeeds; otherwise
+    None (caller raises the existing OSError). Never prompts on the headless
+    branch — that path never reaches here. Never asks for a password.
+    """
+    tty = _open_controlling_tty()
+    if tty is None:
+        return None
+
+    err = _no_emulator_oserror()
+    try:
+        theme.warn(str(err), file=tty)
+        answer = _tty_readline(tty, "Install one now? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            return None
+
+        theme.info("Choose a terminal emulator to install:", file=tty)
+        for i, name in enumerate(_LINUX_EMULATORS, start=1):
+            desc = _LINUX_EMULATOR_DESCRIPTIONS.get(name, "")
+            theme.info(f"  {i}) {name} — {desc}", file=tty)
+        skip_n = len(_LINUX_EMULATORS) + 1
+        theme.info(f"  {skip_n}) skip, don't install anything", file=tty)
+
+        choice_raw = _tty_readline(tty, "Choice: ").strip()
+        try:
+            choice = int(choice_raw)
+        except ValueError:
+            return None
+        if choice == skip_n or choice < 1 or choice > skip_n:
+            return None
+
+        package = _LINUX_EMULATORS[choice - 1]
+        cmd = _pkg_install_command(package)
+        if cmd is not None:
+            theme.info("Run this in another shell (not executed by key-amnesia):", file=tty)
+            theme.out(f"  {cmd}", file=tty)
+        else:
+            theme.info(
+                f"Install package '{package}' with your distro's package manager "
+                "(no known package manager found on PATH).",
+                file=tty,
+            )
+        _tty_readline(tty, "Press Enter after installing… ")
+
+        retry = _tty_readline(tty, "Installed it? Retry now? [y/N] ").strip().lower()
+        if retry not in ("y", "yes"):
+            return None
+
+        proc, tried = _try_spawn_linux_emulators(argv, env, popen_fn=popen_fn)
+        if proc is not None:
+            return proc
+        if tried:
+            # Found but none stayed running — surface the same message as the
+            # normal path rather than the "none on PATH" OSError.
+            raise OSError(
+                f"Terminal emulator(s) found ({', '.join(tried)}) but none stayed "
+                "running (bad invocation or immediate exit). Fail closed."
+            )
+        return None
+    finally:
+        try:
+            tty.close()
+        except Exception:
+            pass
+
+
+def _spawn_linux(
+    argv: list[str],
+    env: dict[str, str],
+    *,
+    popen_fn: Callable[..., Any],
+) -> Any:
+    if not _has_interactive_display():
+        raise OSError(
+            "No interactive display available (DISPLAY/WAYLAND_DISPLAY unset); "
+            "cannot spawn isolated console. Fail closed."
+        )
+
+    proc, tried = _try_spawn_linux_emulators(argv, env, popen_fn=popen_fn)
+    if proc is not None:
+        return proc
 
     if tried:
         raise OSError(
             f"Terminal emulator(s) found ({', '.join(tried)}) but none stayed "
             "running (bad invocation or immediate exit). Fail closed."
         )
-    raise OSError(
-        "No suitable terminal emulator found "
-        f"(tried {', '.join(_LINUX_EMULATORS)}). Fail closed."
-    )
+
+    # Display present, nothing on PATH — one interactive install offer via /dev/tty.
+    offered = _offer_linux_emulator_install(argv, env, popen_fn=popen_fn)
+    if offered is not None:
+        return offered
+    raise _no_emulator_oserror()
 
 
 def spawn_isolated_console(

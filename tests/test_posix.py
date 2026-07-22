@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import io
 import sys
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
-from key_amnesia.platform import spawn_isolated_console
+from key_amnesia.platform import (
+    _LINUX_EMULATORS,
+    _pkg_install_command,
+    spawn_isolated_console,
+)
 
 
 HELPER_ARGV = [sys.executable, "-m", "key_amnesia", "_prompt-helper"]
@@ -26,6 +31,35 @@ def _fake_which(available: dict[str, str]):
         return available.get(name)
 
     return which
+
+
+class _FakeTTY(io.StringIO):
+    """Controlling-tty double: scripted readline answers + captured writes."""
+
+    def __init__(self, answers: list[str]):
+        super().__init__()
+        self._answers = list(answers)
+        self.writes: list[str] = []
+
+    def write(self, s: str) -> int:
+        self.writes.append(s)
+        return super().write(s)
+
+    def readline(self, *args: Any, **kwargs: Any) -> str:  # noqa: ARG002
+        if not self._answers:
+            return "\n"
+        return self._answers.pop(0) + "\n"
+
+    def isatty(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        # Leave buffer readable for assertions after the offer closes the tty.
+        pass
+
+    @property
+    def text(self) -> str:
+        return "".join(self.writes)
 
 
 @pytest.fixture(autouse=True)
@@ -187,16 +221,131 @@ def test_linux_headless_fail_closed(monkeypatch) -> None:
         spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())
 
 
-def test_linux_no_emulator_fail_closed(monkeypatch) -> None:
+def test_linux_no_emulator_tty_unavailable_fail_closed(monkeypatch) -> None:
+    """No emulator + no /dev/tty → identical fail-closed (no offer attempted)."""
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setattr(
         "key_amnesia.platform.shutil.which",
         _fake_which({}),
     )
+    monkeypatch.setattr("key_amnesia.platform._open_controlling_tty", lambda: None)
 
     with pytest.raises(OSError, match="terminal emulator|Fail closed"):
         spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())
+
+
+def test_linux_no_emulator_decline_install_fail_closed(monkeypatch) -> None:
+    """User declines Install one now? → same OSError as today."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({}),
+    )
+    tty = _FakeTTY(answers=["n"])
+    monkeypatch.setattr("key_amnesia.platform._open_controlling_tty", lambda: tty)
+
+    with pytest.raises(OSError, match="terminal emulator|Fail closed"):
+        spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())
+
+    assert "Install one now?" in tty.text
+    assert "No suitable terminal emulator found" in tty.text
+
+
+def test_linux_no_emulator_retry_still_empty_fail_closed(monkeypatch) -> None:
+    """Accept offer + menu + retry, second scan still empty → OSError (one offer only)."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({"apt": "/usr/bin/apt"}),
+    )
+    # y → pick xterm (4) → Enter after install → y retry; which never finds emulators
+    tty = _FakeTTY(answers=["y", "4", "", "y"])
+    monkeypatch.setattr("key_amnesia.platform._open_controlling_tty", lambda: tty)
+
+    with pytest.raises(OSError, match="terminal emulator|Fail closed"):
+        spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())
+
+    text = tty.text
+    assert "Install one now?" in text
+    assert "xterm" in text
+    assert "sudo apt install xterm" in text
+    assert "Installed it? Retry now?" in text
+    # Menu shown once — no second Install offer.
+    assert text.count("Install one now?") == 1
+
+
+def test_linux_no_emulator_retry_success(monkeypatch) -> None:
+    """Accept offer; second which scan finds an emulator → spawn succeeds."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+
+    calls = {"n": 0}
+
+    def which(name: str) -> str | None:
+        # First pass (and pkg-mgr probes during offer): no emulators.
+        # After retry confirmation, xterm appears.
+        if name in _LINUX_EMULATORS:
+            calls["n"] += 1
+            # Emulator which is consulted once per name per scan. First scan:
+            # 4 misses. Offer path may re-probe pkg managers. Second scan after
+            # retry: return xterm.
+            if calls["n"] > len(_LINUX_EMULATORS) and name == "xterm":
+                return "/usr/bin/xterm"
+            return None
+        if name == "apt":
+            return "/usr/bin/apt"
+        return None
+
+    monkeypatch.setattr("key_amnesia.platform.shutil.which", which)
+    tty = _FakeTTY(answers=["y", "4", "", "y"])
+    monkeypatch.setattr("key_amnesia.platform._open_controlling_tty", lambda: tty)
+
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    result = spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
+
+    assert result.poll() is None
+    assert captured["cmd"] == ["/usr/bin/xterm", "-e", *HELPER_ARGV]
+    assert "sudo apt install xterm" in tty.text
+
+
+def test_pkg_manager_detection_order(monkeypatch) -> None:
+    """apt-get/apt, dnf, pacman, apk, zypper — first on PATH wins."""
+    order = ["apt-get", "apt", "dnf", "pacman", "apk", "zypper"]
+    expected = {
+        "apt-get": "sudo apt-get install xterm",
+        "apt": "sudo apt install xterm",
+        "dnf": "sudo dnf install xterm",
+        "pacman": "sudo pacman -S xterm",
+        "apk": "sudo apk add xterm",
+        "zypper": "sudo zypper install xterm",
+    }
+    for name in order:
+        available = {name: f"/usr/bin/{name}"}
+        monkeypatch.setattr(
+            "key_amnesia.platform.shutil.which",
+            _fake_which(available),
+        )
+        assert _pkg_install_command("xterm") == expected[name]
+
+    monkeypatch.setattr("key_amnesia.platform.shutil.which", _fake_which({}))
+    assert _pkg_install_command("xterm") is None
+
+    # Precedence: apt-get before apt when both present.
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({"apt-get": "/usr/bin/apt-get", "apt": "/usr/bin/apt"}),
+    )
+    assert _pkg_install_command("xterm") == "sudo apt-get install xterm"
 
 
 def test_darwin_fail_closed(monkeypatch) -> None:
