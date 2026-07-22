@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,9 +26,32 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def new_database_id() -> str:
+    """Stable hex id for KeePassXC get-databasehash."""
+    return secrets.token_hex(32)
+
+
 def empty_payload() -> dict[str, Any]:
     now = _utc_now_iso()
-    return {"secrets": {}, "created_at": now, "updated_at": now}
+    return {
+        "secrets": {},
+        "logins": [],
+        "browser_associations": [],
+        "database_id": new_database_id(),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Default additive v2 fields for vaults created before logins schema."""
+    if not isinstance(payload.get("logins"), list):
+        payload["logins"] = []
+    if not isinstance(payload.get("browser_associations"), list):
+        payload["browser_associations"] = []
+    if not payload.get("database_id"):
+        payload["database_id"] = new_database_id()
+    return payload
 
 
 def load_vault(path: Path | str | None, password: str) -> dict[str, Any]:
@@ -62,7 +86,7 @@ def load_vault(path: Path | str | None, password: str) -> dict[str, Any]:
         raise VaultError("Vault payload is corrupt") from e
     if not isinstance(payload, dict) or "secrets" not in payload:
         raise VaultError("Vault payload missing secrets")
-    return payload
+    return _normalize_payload(payload)
 
 
 def save_vault(
@@ -90,7 +114,7 @@ def save_vault(
         opslimit=opslimit,
         memlimit=memlimit,
     )
-    body = dict(payload)
+    body = _normalize_payload(dict(payload))
     if "created_at" not in body:
         body["created_at"] = _utc_now_iso()
     body["updated_at"] = _utc_now_iso()

@@ -109,6 +109,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # status
     sub.add_parser("status", help="Show guard session status")
 
+    # Phase 0 seams — handlers filled by later workstreams
+    from key_amnesia.login_cli import build_login_parser
+    from key_amnesia.native_host_install import build_browser_fill_parser
+
+    build_login_parser(sub)
+    build_browser_fill_parser(sub)
+
     # internal helpers (still support --help; omitted from epilog summary)
     sub.add_parser("_prompt-helper", help=argparse.SUPPRESS)
     sub.add_parser("_guard", help=argparse.SUPPRESS)
@@ -442,14 +449,17 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
 
 
 def cmd_lock(_args: argparse.Namespace) -> int:
+    from key_amnesia.browser_fill import clear_browser_fill_lock
     from key_amnesia.guard import clear_guard_lock, guard_is_alive, guard_request
 
     if not guard_is_alive():
         clear_guard_lock()
+        clear_browser_fill_lock()
         theme.info("No active guard session.")
         return 0
     resp = guard_request({"verb": "lock"})
     clear_guard_lock()
+    clear_browser_fill_lock()
     if resp and resp.get("ok"):
         theme.success("Locked.")
         return 0
@@ -615,6 +625,14 @@ def main(argv: list[str] | None = None) -> int:
         from key_amnesia.guard import run_guard_main
 
         return run_guard_main()
+    if args.command == "login":
+        from key_amnesia.login_cli import main as login_main
+
+        return login_main(args)
+    if args.command == "browser-fill":
+        from key_amnesia.native_host_install import main as browser_fill_main
+
+        return browser_fill_main(args)
 
     handlers = {
         "init": cmd_init,

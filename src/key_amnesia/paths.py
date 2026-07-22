@@ -48,5 +48,9 @@ def guard_lock_path() -> Path:
     return data_dir() / "guard.lock"
 
 
+def browser_fill_lock_path() -> Path:
+    return data_dir() / "browser_fill.lock"
+
+
 def audit_log_path() -> Path:
     return data_dir() / "audit.log"
