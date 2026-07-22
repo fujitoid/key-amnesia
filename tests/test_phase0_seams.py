@@ -56,10 +56,16 @@ def test_browser_fill_cli_stub(capsys) -> None:
     assert "not implemented" in err.lower() or "Phase 0" in err
 
 
-def test_native_host_stub(capsys) -> None:
-    from key_amnesia.native_host import main as host_main
+def test_native_host_exits_cleanly_on_eof() -> None:
+    """WS-A replaced the Phase 0 stub: empty stdin EOF → exit 0, no stub message."""
+    import io
 
-    rc = host_main([])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "not implemented" in err.lower()
+    from key_amnesia.native_host import run_host
+
+    stdin = io.BytesIO()
+    stdout = io.BytesIO()
+    stderr = io.StringIO()
+    rc = run_host(stdin=stdin, stdout=stdout, stderr=stderr)
+    assert rc == 0
+    assert stdout.getvalue() == b""
+    assert "not implemented" not in stderr.getvalue().lower()
