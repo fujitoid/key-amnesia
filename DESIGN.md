@@ -2,7 +2,7 @@
 
 Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted vault storage, Windows `CREATE_NEW_CONSOLE` human-prompt routing, a bounded-capability cached guard over named-pipe IPC (authkey only), and buffer-then-scrub output redaction.
 
-**Out of scope for v0:** browser injection, MCP wrapper, GUI, POSIX terminal-spawn equivalent, DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
+**Out of scope for v0:** browser injection, MCP wrapper, GUI, macOS isolated-console spawn (`Terminal.app` / `osascript`), DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
 
 ---
 
@@ -31,7 +31,7 @@ key-amnesia/
     run_exec.py                    # buffer-then-scrub-then-relay
     clipboard.py
     theme.py                       # CLI output helpers (Phase 0 seam; plain print today)
-    platform.py                    # isolated-console spawn (Phase 0 seam; Windows only today)
+    platform.py                    # isolated-console spawn (Windows CREATE_NEW_CONSOLE; Linux terminal emulators)
   tests/
 ```
 
@@ -39,7 +39,7 @@ Entry points: `key-amnesia` and `ka` both → `key_amnesia.cli:main`.
 
 Deps: `pynacl`, `pyperclip`. Dev: `pytest`.
 
-**Phase 0 seams:** `theme.py` and `platform.py` exist so later branding and Linux spawn can land without thrashing `cli.py` / `prompt_route.py`. They are extraction-only today — no visual theme and no non-Windows spawn behavior yet.
+**Phase 0 seams:** `theme.py` and `platform.py` exist so branding and Linux spawn can land without thrashing `cli.py` / `prompt_route.py`. `theme.py` remains extraction-only (plain print) until Workstream B; `platform.py` spawns isolated consoles on Windows and Linux.
 
 ---
 
@@ -85,8 +85,11 @@ Whole-vault AEAD cannot list names without the password. Sidecar `~/.key-amnesia
 Needs human auth
   → stdin.isatty?
       yes → getpass/input inline → KDF decrypt in-process
-      no  → Popen helper CREATE_NEW_CONSOLE (bare argv, env handoff)
-              → console ok? no → fail closed
+      no  → spawn isolated console (bare argv, env handoff)
+              → Windows: CREATE_NEW_CONSOLE
+              → Linux: first of x-terminal-emulator / gnome-terminal / konsole / xterm
+                (requires DISPLAY or WAYLAND_DISPLAY)
+              → macOS / other / headless / no emulator → fail closed
               → parent waits on IPC (timeout 90s)
               → helper already did KDF locally; status-only reply
 ```
@@ -104,7 +107,7 @@ Helper behavior after env handoff:
 - Prints clear UX, collects input, KDF/decrypts in-process.
 - Watches parent PID / IPC disconnect → cancel and exit (no orphan window).
 - Parent receives status-only replies — never password, never raw secrets.
-- **POSIX non-interactive spawn: out of scope for v0; fail closed / unsupported.**
+- **Linux non-interactive spawn:** try `x-terminal-emulator`, then `gnome-terminal`, `konsole`, `xterm` (first on `PATH`). Headless (no `DISPLAY` / `WAYLAND_DISPLAY`), missing emulator, or spawn failure → fail closed. **macOS isolated-console spawn remains out of scope** (fail closed).
 
 ---
 
