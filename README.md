@@ -41,6 +41,27 @@ Or from a local clone: `pip install .` — either way you get both the full `key
 
 > Windows and Linux supported; macOS still falls back to fail-closed (not yet implemented).
 
+### Browser fill — install
+
+key-amnesia can act as the Native Messaging host that the [KeePassXC-Browser](https://keepassxc.org/docs/KeePassXC_GettingStarted.html#_setup_browser_integration) extension already talks to (`org.keepassxc.keepassxc_browser`). No separate extension is required.
+
+```bash
+# After pip install, register manifests for Chrome / Edge / Brave / Firefox:
+ka browser-fill install
+
+# Inspect what is registered (missing / ours / foreign):
+ka browser-fill status
+
+# Remove only key-amnesia's manifests:
+ka browser-fill uninstall
+```
+
+**`ka unlock` is required** before the extension can retrieve logins. Browser-fill runs only while a cached unlock session is live; there is no per-call password path from the native host.
+
+If a browser already has a host registered under that exact name (for example KeePassXC itself), install **warns and asks for confirmation** — or require `--force`. It never silently overwrites. Use `ka browser-fill status` to see `foreign(path=…)` entries before deciding.
+
+Windows and Linux only; macOS install fails closed with a clear message.
+
 ## Two modes: ask every time, or unlock a session
 
 | Mode | What it feels like |
