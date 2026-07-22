@@ -1,8 +1,8 @@
-# key-amnesia v0 — Design
+# key-amnesia v1 — Design
 
 Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted vault storage, Windows `CREATE_NEW_CONSOLE` human-prompt routing, a bounded-capability cached guard over named-pipe IPC (authkey only), and buffer-then-scrub output redaction.
 
-**Out of scope for v0:** browser injection, MCP wrapper, GUI, macOS isolated-console spawn (`Terminal.app` / `osascript`), DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
+**Out of scope for v1:** browser injection (planned as a distinct v3 sub-project), MCP wrapper, GUI, macOS isolated-console spawn (`Terminal.app` / `osascript`), DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
 
 ---
 
@@ -63,7 +63,7 @@ KDF: `argon2id.kdf` with **OPSLIMIT_SENSITIVE / MEMLIMIT_SENSITIVE only** (delib
 
 Whole-vault AEAD cannot list names without the password. Sidecar `~/.key-amnesia/vault.names.json` = `{"names":[...]}` updated on every successful `set`/`remove`.
 
-**Tradeoff:** secret *names* are plaintext at rest on disk; values never are. Acceptable for v0 to keep `list` agent-callable with no prompt. Future option (DPAPI-protect sidecar on Windows) is explicitly out of scope for v0.
+**Tradeoff:** secret *names* are plaintext at rest on disk; values never are. Acceptable for v1 to keep `list` agent-callable with no prompt. Future option (DPAPI-protect sidecar on Windows) is explicitly out of scope for v1.
 
 ### Config (`config.json`)
 
@@ -115,7 +115,7 @@ Helper behavior after env handoff:
 
 ## Output scrubbing (buffer-then-scrub-then-relay)
 
-**No streaming in v0.** For every `run` path (CLI per-call, helper per-call, guard):
+**No streaming in v1.** For every `run` path (CLI per-call, helper per-call, guard):
 
 1. Collect the child’s stdout and stderr **fully** as bytes (`communicate()` / equivalent).
 2. Decode each stream once at the end.
@@ -204,4 +204,4 @@ The guard and helper IPC replies expose only: status, scrubbed stdout/stderr, ex
 
 ## Testing
 
-Vault round-trip / wrong password / tamper; `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex.
+Vault round-trip / wrong password / tamper; `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled (`test_theme.py`).
