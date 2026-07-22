@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from key_amnesia import ipc
+from key_amnesia.audit import audit_browser_fill
 from key_amnesia.logins import find_logins_for_url
 from key_amnesia.paths import browser_fill_lock_path
 from key_amnesia.prompt_route import PromptRequest, require_browser_fill_approval
@@ -214,8 +215,26 @@ def fill_handle_message(
             approved = bool(so["approved"])
         else:
             approved = bool(getattr(outcome, "ok", False))
+        route = str(getattr(outcome, "route", None) or "inline")
+        if route not in ("inline", "spawned-console", "guard-session"):
+            route = "inline"
+        primary_user = usernames[0] if usernames else None
+        reason = str(getattr(outcome, "reason", "") or "")
         if not approved:
-            reason = getattr(outcome, "reason", "") or "denied"
+            reason = reason or "denied"
+            fill_result = (
+                "timeout"
+                if "timeout" in reason.lower() or "timed out" in reason.lower()
+                else "denied"
+            )
+            audit_browser_fill(
+                result=fill_result,
+                url=url,
+                username=primary_user,
+                secret_names=secret_names,
+                route=route,
+                reason=reason,
+            )
             return {"ok": False, "reason": reason}
 
         entries: list[dict[str, Any]] = []
@@ -233,7 +252,22 @@ def fill_handle_message(
                 }
             )
         if not entries:
+            audit_browser_fill(
+                result="denied",
+                url=url,
+                username=primary_user,
+                secret_names=secret_names,
+                route=route,
+                reason="no resolvable secrets",
+            )
             return {"ok": False, "reason": "no resolvable secrets"}
+        audit_browser_fill(
+            result="allowed",
+            url=url,
+            username=primary_user,
+            secret_names=secret_names,
+            route=route,
+        )
         return {"ok": True, "entries": entries}
 
     return {"ok": False, "reason": f"unknown verb: {verb}"}

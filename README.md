@@ -81,9 +81,10 @@ For the security-curious — the full detail lives in [DESIGN.md](DESIGN.md):
 
 - **Encryption:** the vault is a single file sealed with XSalsa20-Poly1305 (libsodium's SecretBox) under a key derived from your master password via Argon2id at its most expensive (`SENSITIVE`) setting — deliberately slow to brute-force, and deliberately never dialed down.
 - **The routing rule:** any command needing your password checks whether it's running in a real terminal. Yes → asks right there. No (an agent invoked it) → spawns a fresh, isolated console window whose keyboard input can only come from you. No interactive session at all → fails closed, never falls back to something insecure.
-- **The guard never hands out secrets.** In cached mode, the guard *itself* runs your command with the secret injected and returns only the censored output and exit code. Its protocol simply has no "give me the value" request — so even another process connecting to it directly can't ask for one.
+- **The guard never hands out secrets.** In cached mode, the guard *itself* runs your command with the secret injected and returns only the censored output and exit code. Its protocol simply has no "give me the value" request — so even another process connecting to it directly can't ask for one. Guard verbs stay exactly `run` / `list` / `lock` / `status` / `renew`.
 - **Nothing sensitive on command lines.** Windows records process command lines in its audit logs (event 4688); key-amnesia passes all sensitive hand-off data between its own processes via environment variables instead.
-- **Audit log:** `~/.key-amnesia/audit.log`, append-only JSON lines — timestamp, action, secret names (never values), route, allowed/denied/timeout.
+- **Audit log:** `~/.key-amnesia/audit.log`, append-only JSON lines — timestamp, action, secret names (never values), route, allowed/denied/timeout. Browser-fill attempts use `browser-fill` / `browser-fill-denied` / `browser-fill-timeout` with site URL and optional username — still never the password.
+- **Two-tier model (v2 browser fill):** the hard guarantee above still holds for the agent/guard path. Separately, after you approve a fill popup, a password may be handed to the KeePassXC-Browser extension over Native Messaging. That value never comes back to an agent-invoked CLI. Fill requires a live `ka unlock` session (no per-call fill in v2). Extension `set-login` is stubbed — create logins via CLI only. Only one Native Messaging host named `org.keepassxc.keepassxc_browser` can be active per browser profile (install warns on collision).
 
 Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAULT_PATH`).
 
@@ -92,13 +93,14 @@ Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAUL
 No tool in this class can promise absolute secrecy, and we'd rather tell you exactly where the edges are:
 
 1. **A command you run can still leak its own secret.** Censoring catches exact copies of the value in output — a command that base64-encodes or otherwise obfuscates the secret before printing slips through. This limit is shared by every tool of this kind (`op run`, `teller run`).
-2. **Output is not live.** Command output is collected fully, censored, then released — the agent sees it only after the command finishes.
-3. **Secret *names* are stored in plain text** (so `ka list` can work without a password). Values never are. Treat names as non-sensitive labels.
-4. **The pop-up window assumes the agent can't control your screen.** If you've given an agent screen-reading *and* keyboard/mouse-injection powers, the window's isolation weakens — your typed password stays hidden, but a yes/no confirmation could theoretically be clicked by such an agent.
-5. **Headless machines fail closed.** No display → no way to approve → the operation is denied. By design.
-6. **Same-user processes share your privileges.** Any program running under your OS account can talk to a live guard session (this is equally true of `ssh-agent`). That's why the guard is designed to never return raw values — the worst a rogue same-user process gets is the same bounded "run a command" capability the legitimate path has.
-7. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
-8. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
+2. **Browser autofill has a similar residual edge.** After you approve a fill, the password is in the page's form fields where a same-browser script or malicious extension could read it. key-amnesia still never returns that value to an agent CLI, and never writes it to the audit log.
+3. **Output is not live.** Command output is collected fully, censored, then released — the agent sees it only after the command finishes.
+4. **Secret *names* are stored in plain text** (so `ka list` can work without a password). Values never are. Treat names as non-sensitive labels.
+5. **The pop-up window assumes the agent can't control your screen.** If you've given an agent screen-reading *and* keyboard/mouse-injection powers, the window's isolation weakens — your typed password stays hidden, but a yes/no confirmation could theoretically be clicked by such an agent.
+6. **Headless machines fail closed.** No display → no way to approve → the operation is denied. By design.
+7. **Same-user processes share your privileges.** Any program running under your OS account can talk to a live guard session (this is equally true of `ssh-agent`). That's why the guard is designed to never return raw values — the worst a rogue same-user process gets is the same bounded "run a command" capability the legitimate path has. Browser-fill is a separate channel that *can* return passwords, but only to the native host after your per-attempt approval — and only while `ka unlock` is live.
+8. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
+9. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
 
 ## CLI appearance
 
