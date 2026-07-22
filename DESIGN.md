@@ -39,7 +39,7 @@ key-amnesia/
     run_exec.py                    # buffer-then-scrub-then-relay
     clipboard.py
     theme.py                       # branded CLI output (NO_COLOR / non-TTY safe)
-    platform.py                    # isolated-console spawn (Windows CREATE_NEW_CONSOLE; Linux terminal emulators)
+    platform.py                    # isolated-console spawn (Windows CREATE_NEW_CONSOLE; Linux emulators + /dev/tty install offer)
   tests/
 ```
 
