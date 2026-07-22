@@ -15,6 +15,8 @@ key-amnesia/
   LICENSE                          # Apache 2.0
   .gitignore
   pyproject.toml
+  .claude/hooks/                   # PreToolUse secret hooks + install note
+  skills/                          # using-key-amnesia + chat-secret-privacy agent skills
   src/key_amnesia/
     __init__.py
     __main__.py
@@ -30,7 +32,7 @@ key-amnesia/
     guard.py
     run_exec.py                    # buffer-then-scrub-then-relay
     clipboard.py
-    theme.py                       # CLI output helpers (Phase 0 seam; plain print today)
+    theme.py                       # branded CLI output (NO_COLOR / non-TTY safe)
     platform.py                    # isolated-console spawn (Windows CREATE_NEW_CONSOLE; Linux terminal emulators)
   tests/
 ```
@@ -39,7 +41,7 @@ Entry points: `key-amnesia` and `ka` both → `key_amnesia.cli:main`.
 
 Deps: `pynacl`, `pyperclip`. Dev: `pytest`.
 
-**Phase 0 seams:** `theme.py` and `platform.py` exist so branding and Linux spawn can land without thrashing `cli.py` / `prompt_route.py`. `theme.py` remains extraction-only (plain print) until Workstream B; `platform.py` spawns isolated consoles on Windows and Linux.
+**Seams:** `theme.py` owns all branded local-console UX (respects `NO_COLOR` / non-TTY; scrubbed relays and raw reveal values stay unstyled). `platform.py` owns isolated-console spawn on Windows and Linux (macOS fail-closed).
 
 ---
 
