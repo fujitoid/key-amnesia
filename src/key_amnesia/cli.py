@@ -14,6 +14,7 @@ from key_amnesia.audit import audit_event
 from key_amnesia.config import ConfigError, load_config, set_config_value
 from key_amnesia.paths import vault_path
 from key_amnesia.prompt_route import PromptRequest, require_human_auth
+from key_amnesia import theme
 from key_amnesia.vault import (
     VaultError,
     empty_payload,
@@ -132,12 +133,11 @@ def _prompt_new_master_password() -> str | None:
     p1 = getpass.getpass("Master password: ")
     p2 = getpass.getpass("Confirm master password: ")
     if not p1:
-        print("Error: master password cannot be empty.", file=sys.stderr)
+        theme.error("Error: master password cannot be empty.")
         return None
     if p1 != p2:
-        print(
+        theme.error(
             "Error: passwords do not match — vault not created.",
-            file=sys.stderr,
         )
         return None
     return p1
@@ -146,16 +146,14 @@ def _prompt_new_master_password() -> str | None:
 def cmd_init(_args: argparse.Namespace) -> int:
     vp = vault_path()
     if vp.exists():
-        print(
+        theme.error(
             "vault already initialized, use ka set to add secrets",
-            file=sys.stderr,
         )
         return 1
     if not sys.stdin.isatty():
-        print(
+        theme.error(
             "Error: ka init requires an interactive terminal "
             "(run it directly in your console).",
-            file=sys.stderr,
         )
         return 1
     password = _prompt_new_master_password()
@@ -164,10 +162,10 @@ def cmd_init(_args: argparse.Namespace) -> int:
     try:
         save_vault(vp, password, empty_payload())
     except VaultError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        theme.error(f"Error: {e}")
         return 1
-    print(f"Vault initialized at {vp}")
-    print(
+    theme.success(f"Vault initialized at {vp}")
+    theme.info(
         "Remember your master password — it cannot be recovered if forgotten."
     )
     return 0
@@ -189,9 +187,8 @@ def cmd_set(args: argparse.Namespace) -> int:
     name = args.name
     value = args.value
     if not vault_path().exists():
-        print(
+        theme.error(
             "Vault not initialized. Run 'ka init' first.",
-            file=sys.stderr,
         )
         return 1
     # Prefer not putting secret values on argv — if omitted, prompt (inline only)
@@ -203,7 +200,7 @@ def cmd_set(args: argparse.Namespace) -> int:
     # If value missing and interactive, collect value after password inline.
     ok, password, outcome = _auth_password(request)
     if not ok:
-        print(f"Denied: {outcome.reason}", file=sys.stderr)
+        theme.error(f"Denied: {outcome.reason}")
         return 1
 
     if password is not None:
@@ -213,7 +210,7 @@ def cmd_set(args: argparse.Namespace) -> int:
         try:
             payload = load_vault(None, password)
         except VaultError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            theme.error(f"Error: {e}")
             audit_event(
                 "set",
                 secret_names=[name],
@@ -230,21 +227,20 @@ def cmd_set(args: argparse.Namespace) -> int:
             route=outcome.route,
             result="allowed",
         )
-        print(f"Set secret '{name}'.")
+        theme.success(f"Set secret '{name}'.")
         return 0
 
     # Spawned helper already mutated (or failed).
     if outcome.status_only and outcome.status_only.get("action") == "set":
-        print(f"Set secret '{name}'.")
+        theme.success(f"Set secret '{name}'.")
         return 0
     # If value was None and we went non-interactive without detail, fail.
     if value is None:
-        print(
+        theme.error(
             "Non-interactive set requires the value (or an interactive terminal).",
-            file=sys.stderr,
         )
         return 1
-    print(f"Denied: {outcome.reason or 'set failed'}", file=sys.stderr)
+    theme.error(f"Denied: {outcome.reason or 'set failed'}")
     return 1
 
 
@@ -253,17 +249,17 @@ def cmd_remove(args: argparse.Namespace) -> int:
     request = PromptRequest(action="remove", secret_names=[name])
     ok, password, outcome = _auth_password(request)
     if not ok:
-        print(f"Denied: {outcome.reason}", file=sys.stderr)
+        theme.error(f"Denied: {outcome.reason}")
         return 1
 
     if password is not None:
         try:
             payload = load_vault(None, password)
         except VaultError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            theme.error(f"Error: {e}")
             return 1
         if name not in payload["secrets"]:
-            print(f"Unknown secret: {name}", file=sys.stderr)
+            theme.error(f"Unknown secret: {name}")
             audit_event(
                 "remove",
                 secret_names=[name],
@@ -277,13 +273,13 @@ def cmd_remove(args: argparse.Namespace) -> int:
         audit_event(
             "remove", secret_names=[name], route=outcome.route, result="allowed"
         )
-        print(f"Removed secret '{name}'.")
+        theme.success(f"Removed secret '{name}'.")
         return 0
 
     if outcome.status_only and outcome.status_only.get("action") == "remove":
-        print(f"Removed secret '{name}'.")
+        theme.success(f"Removed secret '{name}'.")
         return 0
-    print(f"Denied: {outcome.reason or 'remove failed'}", file=sys.stderr)
+    theme.error(f"Denied: {outcome.reason or 'remove failed'}")
     return 1
 
 
@@ -292,7 +288,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
-        print("Usage: key-amnesia run --secret NAME [--as NAME=ENV] -- command...", file=sys.stderr)
+        theme.error("Usage: key-amnesia run --secret NAME [--as NAME=ENV] -- command...")
         return 2
 
     inject_as = _parse_as_mappings(args.as_env)
@@ -302,7 +298,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         if n not in secret_names:
             secret_names.append(n)
     if not secret_names:
-        print("At least one --secret or --as is required.", file=sys.stderr)
+        theme.error("At least one --secret or --as is required.")
         return 2
 
     # Try live guard first (cached mode).
@@ -323,12 +319,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             sys.stderr.write(resp.get("scrubbed_stderr", ""))
             return int(resp.get("exit_code", 0))
         if resp and resp.get("expired"):
-            print("Guard session expired; falling back to per-call auth.", file=sys.stderr)
+            theme.warn("Guard session expired; falling back to per-call auth.")
         elif resp and not resp.get("ok"):
             # Guard reachable but denied (e.g. unknown secret) — don't fall through
             # with a password prompt unless it's expiry/connectivity.
             if "unknown" in str(resp.get("reason", "")):
-                print(f"Error: {resp.get('reason')}", file=sys.stderr)
+                theme.error(f"Error: {resp.get('reason')}")
                 return 1
 
     request = PromptRequest(
@@ -340,7 +336,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
-        print(f"Denied: {outcome.reason}", file=sys.stderr)
+        theme.error(f"Denied: {outcome.reason}")
         return 1
 
     if password is not None:
@@ -349,7 +345,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         try:
             payload = load_vault(None, password)
         except VaultError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            theme.error(f"Error: {e}")
             audit_event(
                 "run",
                 secret_names=secret_names,
@@ -362,7 +358,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         secrets_map = {k: str(v) for k, v in payload["secrets"].items()}
         missing = [n for n in secret_names if n not in secrets_map]
         if missing:
-            print(f"Unknown secrets: {', '.join(missing)}", file=sys.stderr)
+            theme.error(f"Unknown secrets: {', '.join(missing)}")
             return 1
         env_inject = {inject_as.get(n, n): secrets_map[n] for n in secret_names}
         by_name = {n: secrets_map[n] for n in secret_names}
@@ -383,7 +379,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.stdout.write(outcome.run_result.get("scrubbed_stdout", ""))
         sys.stderr.write(outcome.run_result.get("scrubbed_stderr", ""))
         return int(outcome.run_result.get("exit_code") or 0)
-    print(f"Denied: {outcome.reason or 'run failed'}", file=sys.stderr)
+    theme.error(f"Denied: {outcome.reason or 'run failed'}")
     return 1
 
 
@@ -396,11 +392,11 @@ def cmd_list(_args: argparse.Namespace) -> int:
         if resp and resp.get("ok"):
             names = list(resp.get("names") or [])
             for n in names:
-                print(n)
+                theme.out(n)
             return 0
     names = read_names()
     for n in names:
-        print(n)
+        theme.out(n)
     return 0
 
 
@@ -408,7 +404,7 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
     from key_amnesia.guard import guard_is_alive, start_guard_process
 
     if guard_is_alive():
-        print("Guard session already active.", file=sys.stderr)
+        theme.warn("Guard session already active.")
         return 0
 
     cfg = load_config()
@@ -420,28 +416,28 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
-        print(f"Denied: {outcome.reason}", file=sys.stderr)
+        theme.error(f"Denied: {outcome.reason}")
         return 1
 
     if password is not None:
         try:
             payload = load_vault(None, password)
         except VaultError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            theme.error(f"Error: {e}")
             return 1
         try:
             pid = start_guard_process(payload, timeout_min)
         except Exception as e:  # noqa: BLE001
-            print(f"Failed to start guard: {e}", file=sys.stderr)
+            theme.error(f"Failed to start guard: {e}")
             return 1
         audit_event("unlock", route=outcome.route, result="allowed")
-        print(f"Unlocked (guard pid {pid}, timeout {timeout_min}m).")
+        theme.success(f"Unlocked (guard pid {pid}, timeout {timeout_min}m).")
         return 0
 
     if outcome.status_only and outcome.status_only.get("action") == "unlock":
-        print(f"Unlocked (timeout {timeout_min}m).")
+        theme.success(f"Unlocked (timeout {timeout_min}m).")
         return 0
-    print(f"Denied: {outcome.reason or 'unlock failed'}", file=sys.stderr)
+    theme.error(f"Denied: {outcome.reason or 'unlock failed'}")
     return 1
 
 
@@ -450,14 +446,14 @@ def cmd_lock(_args: argparse.Namespace) -> int:
 
     if not guard_is_alive():
         clear_guard_lock()
-        print("No active guard session.")
+        theme.info("No active guard session.")
         return 0
     resp = guard_request({"verb": "lock"})
     clear_guard_lock()
     if resp and resp.get("ok"):
-        print("Locked.")
+        theme.success("Locked.")
         return 0
-    print("Lock signal sent; cleared local lock file.")
+    theme.info("Lock signal sent; cleared local lock file.")
     return 0
 
 
@@ -471,20 +467,21 @@ def cmd_reveal(args: argparse.Namespace) -> int:
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
-        print(f"Denied: {outcome.reason}", file=sys.stderr)
+        theme.error(f"Denied: {outcome.reason}")
         return 1
 
     if password is not None:
         try:
             payload = load_vault(None, password)
         except VaultError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            theme.error(f"Error: {e}")
             return 1
         secrets_map = payload.get("secrets", {})
         if name not in secrets_map:
-            print(f"Unknown secret: {name}", file=sys.stderr)
+            theme.error(f"Unknown secret: {name}")
             return 1
-        print(secrets_map[name])
+        # Raw secret value — never themed.
+        sys.stdout.write(f"{secrets_map[name]}\n")
         audit_event(
             "reveal", secret_names=[name], route=outcome.route, result="allowed"
         )
@@ -492,9 +489,9 @@ def cmd_reveal(args: argparse.Namespace) -> int:
 
     # Non-interactive: helper showed in its window; caller gets status only.
     if outcome.status_only and outcome.status_only.get("shown"):
-        print(f"Secret '{name}' displayed in authentication console.")
+        theme.info(f"Secret '{name}' displayed in authentication console.")
         return 0
-    print(f"Denied: {outcome.reason or 'reveal failed'}", file=sys.stderr)
+    theme.error(f"Denied: {outcome.reason or 'reveal failed'}")
     return 1
 
 
@@ -507,7 +504,7 @@ def cmd_copy(args: argparse.Namespace) -> int:
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
-        print(f"Denied: {outcome.reason}", file=sys.stderr)
+        theme.error(f"Denied: {outcome.reason}")
         return 1
 
     if password is not None:
@@ -516,30 +513,30 @@ def cmd_copy(args: argparse.Namespace) -> int:
         try:
             payload = load_vault(None, password)
         except VaultError as e:
-            print(f"Error: {e}", file=sys.stderr)
+            theme.error(f"Error: {e}")
             return 1
         secrets_map = payload.get("secrets", {})
         if name not in secrets_map:
-            print(f"Unknown secret: {name}", file=sys.stderr)
+            theme.error(f"Unknown secret: {name}")
             return 1
         copy_to_clipboard(str(secrets_map[name]))
         audit_event(
             "copy", secret_names=[name], route=outcome.route, result="allowed"
         )
-        print(f"Copied '{name}' to clipboard.")
+        theme.success(f"Copied '{name}' to clipboard.")
         return 0
 
     if outcome.status_only and outcome.status_only.get("copied"):
-        print(f"Secret '{name}' copied in authentication console.")
+        theme.info(f"Secret '{name}' copied in authentication console.")
         return 0
-    print(f"Denied: {outcome.reason or 'copy failed'}", file=sys.stderr)
+    theme.error(f"Denied: {outcome.reason or 'copy failed'}")
     return 1
 
 
 def cmd_config(args: argparse.Namespace) -> int:
     if args.config_command == "show" or args.config_command is None:
         cfg = load_config()
-        print(json.dumps(cfg, indent=2))
+        theme.out(json.dumps(cfg, indent=2))
         return 0
     if args.config_command == "set":
         request = PromptRequest(
@@ -548,7 +545,7 @@ def cmd_config(args: argparse.Namespace) -> int:
         )
         ok, password, outcome = _auth_password(request)
         if not ok:
-            print(f"Denied: {outcome.reason}", file=sys.stderr)
+            theme.error(f"Denied: {outcome.reason}")
             return 1
         if password is not None:
             # Verify password against vault if it exists (fresh auth proof).
@@ -557,12 +554,12 @@ def cmd_config(args: argparse.Namespace) -> int:
                 try:
                     load_vault(None, password)
                 except VaultError as e:
-                    print(f"Error: {e}", file=sys.stderr)
+                    theme.error(f"Error: {e}")
                     return 1
             try:
                 set_config_value(args.key, args.value)
             except ConfigError as e:
-                print(f"Error: {e}", file=sys.stderr)
+                theme.error(f"Error: {e}")
                 return 1
             audit_event(
                 "config",
@@ -570,14 +567,14 @@ def cmd_config(args: argparse.Namespace) -> int:
                 result="allowed",
                 reason=f"set {args.key}",
             )
-            print(f"Set {args.key} = {args.value}")
+            theme.success(f"Set {args.key} = {args.value}")
             return 0
         if outcome.status_only and outcome.status_only.get("action") == "config":
-            print(f"Set {args.key} = {args.value}")
+            theme.success(f"Set {args.key} = {args.value}")
             return 0
-        print(f"Denied: {outcome.reason or 'config failed'}", file=sys.stderr)
+        theme.error(f"Denied: {outcome.reason or 'config failed'}")
         return 1
-    print("Usage: key-amnesia config [show|set KEY VALUE]", file=sys.stderr)
+    theme.error("Usage: key-amnesia config [show|set KEY VALUE]")
     return 2
 
 
@@ -586,19 +583,19 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
     lock = read_guard_lock()
     if not lock or not guard_is_alive(lock):
-        print("guard: inactive")
+        theme.out("guard: inactive")
         cfg = load_config()
-        print(f"session-mode: {cfg.get('session-mode')}")
+        theme.out(f"session-mode: {cfg.get('session-mode')}")
         return 0
     resp = guard_request({"verb": "status"})
-    print("guard: active")
+    theme.out("guard: active")
     if resp and resp.get("ok"):
-        print(f"pid: {resp.get('pid')}")
-        print(f"expires_at: {resp.get('expires_at')}")
-        print(f"secret_count: {resp.get('secret_count')}")
+        theme.out(f"pid: {resp.get('pid')}")
+        theme.out(f"expires_at: {resp.get('expires_at')}")
+        theme.out(f"secret_count: {resp.get('secret_count')}")
     else:
-        print(f"pid: {lock.get('pid')}")
-        print(f"expires_at: {lock.get('expires_at')}")
+        theme.out(f"pid: {lock.get('pid')}")
+        theme.out(f"expires_at: {lock.get('expires_at')}")
     return 0
 
 

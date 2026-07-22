@@ -30,12 +30,16 @@ key-amnesia/
     guard.py
     run_exec.py                    # buffer-then-scrub-then-relay
     clipboard.py
+    theme.py                       # CLI output helpers (Phase 0 seam; plain print today)
+    platform.py                    # isolated-console spawn (Phase 0 seam; Windows only today)
   tests/
 ```
 
 Entry points: `key-amnesia` and `ka` both → `key_amnesia.cli:main`.
 
 Deps: `pynacl`, `pyperclip`. Dev: `pytest`.
+
+**Phase 0 seams:** `theme.py` and `platform.py` exist so later branding and Linux spawn can land without thrashing `cli.py` / `prompt_route.py`. They are extraction-only today — no visual theme and no non-Windows spawn behavior yet.
 
 ---
 
