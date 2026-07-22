@@ -78,12 +78,22 @@ def test_noninteractive_spawns_create_new_console_bare_argv_env(
 
 
 def test_posix_noninteractive_fail_closed(monkeypatch) -> None:
+    """Headless / non-Linux POSIX still fails closed (no insecure fallback)."""
     if sys.platform == "win32":
         pytest.skip("POSIX fail-closed path")
+    # Force headless so Linux CI with a display still hits fail-closed.
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     req = PromptRequest(action="reveal", secret_names=["x"])
     outcome = require_human_auth(req, timeout_s=1, isatty_fn=lambda: False)
     assert outcome.ok is False
-    assert "Windows-only" in outcome.reason or "out of scope" in outcome.reason.lower()
+    reason = (outcome.reason or "").lower()
+    assert (
+        "fail closed" in reason
+        or "display" in reason
+        or "not implemented" in reason
+        or "terminal emulator" in reason
+    )
 
 
 def test_inline_auth_returns_password(ka_home) -> None:

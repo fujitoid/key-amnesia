@@ -39,7 +39,7 @@ pip install git+https://github.com/fujitoid/key-amnesia
 
 Or from a local clone: `pip install .` — either way you get both the full `key-amnesia` command and the short `ka` alias.
 
-> **Windows-first.** v0 targets Windows. On Linux/Mac the interactive commands work in your own terminal, but the pop-up-console flow for agent-triggered approval is not implemented yet (such calls fail safely with a clear error).
+> Windows and Linux supported; macOS still falls back to fail-closed (not yet implemented).
 
 ## Two modes: ask every time, or unlock a session
 
