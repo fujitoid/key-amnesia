@@ -42,11 +42,18 @@ def test_browser_fill_approve_inline_no() -> None:
     assert outcome.status_only and outcome.status_only.get("approved") is False
 
 
-def test_login_cli_stub(capsys) -> None:
+def test_login_cli_wired(monkeypatch, password, seeded_vault, capsys) -> None:
+    """login is implemented (WS-C); still requires fresh auth."""
+    from key_amnesia.prompt_route import AuthOutcome
+
+    monkeypatch.setattr(
+        "key_amnesia.login_cli.require_human_auth",
+        lambda *a, **k: AuthOutcome(ok=True, route="inline", password=password),
+    )
     rc = main(["login", "list"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "not implemented" in err.lower() or "Phase 0" in err
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No login associations." in (captured.out + captured.err)
 
 
 def test_browser_fill_cli_stub(capsys) -> None:
