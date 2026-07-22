@@ -198,7 +198,7 @@ Master password never appears on this channel in any form. Master password is ne
 - **per-call (default):** no persistent guard; each privileged op goes through password routing; discard after use. Browser-fill is **unavailable** in this mode (no unlock session).
 - **cached:** `unlock` starts guard holding decrypted vault **and** the browser-fill Listener; timeout from unlock; ~2 min before expiry prompt extend on guard’s TTY if still interactive; `lock` tears down both. Live guard → `run`/`list` skip prompt; live fill → `get-logins-for-url` after per-attempt approval.
 
-Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`, `remove`, `config set`, and **`set`**. Browser-fill **reads** are the named cached-session exception above (approval popup, not fresh password). Extension `set-login` remains stubbed — not cached-session-eligible.
+Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`, `remove`, `config set`, **`set`**, and **`login add` / `login list` / `login remove`**. Browser-fill **reads** are the named cached-session exception above (approval popup, not fresh password). Extension `set-login` remains stubbed — not cached-session-eligible.
 
 ---
 
@@ -210,6 +210,10 @@ Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`
 - `list` — read names sidecar (no prompt); never values
 - `unlock` / `lock` — cached session control
 - `reveal` / `copy` — always fresh auth; display location follows TTY vs helper rule
+- `login add <url> <username> <secret-name>` — fresh auth; associate an existing secret with a site/username (secret must already exist)
+- `login list` — fresh auth; print url/username/secret_name only (never password values); no prompt-free sidecar
+- `login remove <url> <username>` — fresh auth; drop that association
+- Extension `set-login` is stubbed in v2 — CLI `login add` is the only create path
 - `config set session-mode|session-timeout-minutes` — always fresh auth
 - `_prompt-helper` — internal; bare argv + env handoff; omitted from top-level summary, still supports `--help`
 

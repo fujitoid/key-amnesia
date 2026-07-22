@@ -42,24 +42,39 @@ def test_browser_fill_approve_inline_no() -> None:
     assert outcome.status_only and outcome.status_only.get("approved") is False
 
 
-def test_login_cli_stub(capsys) -> None:
+def test_login_cli_wired(monkeypatch, password, seeded_vault, capsys) -> None:
+    """login is implemented (WS-C); still requires fresh auth."""
+    from key_amnesia.prompt_route import AuthOutcome
+
+    monkeypatch.setattr(
+        "key_amnesia.login_cli.require_human_auth",
+        lambda *a, **k: AuthOutcome(ok=True, route="inline", password=password),
+    )
     rc = main(["login", "list"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "not implemented" in err.lower() or "Phase 0" in err
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No login associations." in (captured.out + captured.err)
 
 
-def test_browser_fill_cli_stub(capsys) -> None:
+def test_browser_fill_cli_wired(capsys) -> None:
+    """WS-B fills install/status; seam must dispatch (not the Phase 0 stub)."""
     rc = main(["browser-fill", "status"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "not implemented" in err.lower() or "Phase 0" in err
+    assert rc in (0, 1)
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "not implemented" not in out.lower()
 
 
-def test_native_host_stub(capsys) -> None:
-    from key_amnesia.native_host import main as host_main
+def test_native_host_exits_cleanly_on_eof() -> None:
+    """WS-A replaced the Phase 0 stub: empty stdin EOF → exit 0, no stub message."""
+    import io
 
-    rc = host_main([])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "not implemented" in err.lower()
+    from key_amnesia.native_host import run_host
+
+    stdin = io.BytesIO()
+    stdout = io.BytesIO()
+    stderr = io.StringIO()
+    rc = run_host(stdin=stdin, stdout=stdout, stderr=stderr)
+    assert rc == 0
+    assert stdout.getvalue() == b""
+    assert "not implemented" not in stderr.getvalue().lower()
