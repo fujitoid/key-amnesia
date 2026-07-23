@@ -41,27 +41,6 @@ Or from a local clone: `pip install .` — either way you get both the full `key
 
 > Windows and Linux supported; macOS still falls back to fail-closed (not yet implemented).
 
-### Browser fill — install
-
-key-amnesia can act as the Native Messaging host that the [KeePassXC-Browser](https://keepassxc.org/docs/KeePassXC_GettingStarted.html#_setup_browser_integration) extension already talks to (`org.keepassxc.keepassxc_browser`). No separate extension is required.
-
-```bash
-# After pip install, register manifests for Chrome / Edge / Brave / Firefox:
-ka browser-fill install
-
-# Inspect what is registered (missing / ours / foreign):
-ka browser-fill status
-
-# Remove only key-amnesia's manifests:
-ka browser-fill uninstall
-```
-
-**`ka unlock` is required** before the extension can retrieve logins. Browser-fill runs only while a cached unlock session is live; there is no per-call password path from the native host.
-
-If a browser already has a host registered under that exact name (for example KeePassXC itself), install **warns and asks for confirmation** — or require `--force`. It never silently overwrites. Use `ka browser-fill status` to see `foreign(path=…)` entries before deciding.
-
-Windows and Linux only; macOS install fails closed with a clear message.
-
 ## Two modes: ask every time, or unlock a session
 
 | Mode | What it feels like |
@@ -75,13 +54,14 @@ ka unlock                           # start a session
 ka lock                             # end it early, any time
 ```
 
-Before a session expires, the guard asks *in its own window* whether to extend. No answer means it locks itself.
+`ka unlock` runs the guard *in that terminal* — it's the same window for the life of the session. Before it expires, the guard asks right there whether to extend. No answer means it locks itself. The first command any client sends to a live guard also gets a one-time yes/no admission prompt in that same window (`Session (pid ...) wants: ... Admit? [y/N]`) — approve once and the rest of that session's commands go straight through.
 
 ## Commands
 
 | Command | What it does |
 |---------|--------------|
 | `ka init` | Create an empty vault (type master password twice; refuse if already exists) |
+| `ka passwd` / `ka change-password` | Change the master password (re-encrypts the vault with a fresh salt; refuses while a session is active) |
 | `ka set NAME` | Store or update a secret (value typed hidden; password required; vault must already exist) |
 | `ka remove NAME` | Delete a secret (password required) |
 | `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. |
@@ -89,25 +69,12 @@ Before a session expires, the guard asks *in its own window* whether to extend. 
 | `ka unlock` / `ka lock` | Start / end a cached session |
 | `ka reveal NAME` | Show a value to *you* (password required every time, even mid-session) |
 | `ka copy NAME` | Copy a value to your clipboard instead of showing it (same rule) |
-| `ka login …` | Manage URL/username ↔ secret associations for browser fill — see [Managing logins](#managing-logins) |
 | `ka config show` / `ka config set KEY VALUE` | View / change settings (changes require your password) |
-| `ka status` | Is a session active, and until when |
+| `ka status` | Is a session active, and until when — plus, if not, what happened to the last one |
 
 Every command supports `--help`.
 
 `reveal` and `copy` deserve a special note: even if an agent invokes them, the value appears **only in the pop-up window on your screen** (or your clipboard) — the agent's own process receives nothing but a status flag. And they *always* require a fresh password, session or no session — so an agent can never ride an open session into actually reading a value.
-
-### Managing logins
-
-Browser fill looks up which vault secret to use for a site via **login associations** — a URL, username, and existing secret name. Create and manage them only from the CLI (the extension's `set-login` path is stubbed in v2; the CLI is the only create path):
-
-```text
-ka login add <url> <username> <secret-name>
-ka login list
-ka login remove <url> <username>
-```
-
-Each of these always asks for your master password (fresh auth — never a cached session shortcut). `list` prints `url`, `username`, and `secret_name` only — never password values. The named secret must already exist (`ka set` it first) before you can `login add` it.
 
 ## Under the hood
 
@@ -117,8 +84,9 @@ For the security-curious — the full detail lives in [DESIGN.md](DESIGN.md):
 - **The routing rule:** any command needing your password checks whether it's running in a real terminal. Yes → asks right there. No (an agent invoked it) → spawns a fresh, isolated console window whose keyboard input can only come from you. No interactive session at all → fails closed, never falls back to something insecure.
 - **The guard never hands out secrets.** In cached mode, the guard *itself* runs your command with the secret injected and returns only the censored output and exit code. Its protocol simply has no "give me the value" request — so even another process connecting to it directly can't ask for one. Guard verbs stay exactly `run` / `list` / `lock` / `status` / `renew`.
 - **Nothing sensitive on command lines.** Windows records process command lines in its audit logs (event 4688); key-amnesia passes all sensitive hand-off data between its own processes via environment variables instead.
-- **Audit log:** `~/.key-amnesia/audit.log`, append-only JSON lines — timestamp, action, secret names (never values), route, allowed/denied/timeout. Browser-fill attempts use `browser-fill` / `browser-fill-denied` / `browser-fill-timeout` with site URL and optional username — still never the password.
-- **Two-tier model (v2 browser fill):** the hard guarantee above still holds for the agent/guard path. Separately, after you approve a fill popup, a password may be handed to the KeePassXC-Browser extension over Native Messaging. That value never comes back to an agent-invoked CLI. Fill requires a live `ka unlock` session (no per-call fill in v2). Extension `set-login` is stubbed — create logins via CLI only. Only one Native Messaging host named `org.keepassxc.keepassxc_browser` can be active per browser profile (install warns on collision).
+- **Audit log:** `~/.key-amnesia/audit.log`, append-only JSON lines — timestamp, action, secret names (never values), route, allowed/denied/timeout.
+- **Admission consent:** the first command any client sends to a live guard triggers a one-time yes/no prompt in the guard's own terminal window; approve once and it's remembered (an opaque token, not a password) for the rest of that session. This sits on top of — never replaces — the hard guarantee above.
+- **Honest death reporting:** `ka lock` / `ka status` tell you what actually happened to the last session (`locked`, `expired`, `interrupted`, or `crashed: <reason>`) instead of a bare "no active session."
 
 Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAULT_PATH`).
 
@@ -127,14 +95,13 @@ Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAUL
 No tool in this class can promise absolute secrecy, and we'd rather tell you exactly where the edges are:
 
 1. **A command you run can still leak its own secret.** Censoring catches exact copies of the value in output — a command that base64-encodes or otherwise obfuscates the secret before printing slips through. This limit is shared by every tool of this kind (`op run`, `teller run`).
-2. **Browser autofill has a similar residual edge.** After you approve a fill, the password is in the page's form fields where a same-browser script or malicious extension could read it. key-amnesia still never returns that value to an agent CLI, and never writes it to the audit log.
-3. **Output is not live.** Command output is collected fully, censored, then released — the agent sees it only after the command finishes.
-4. **Secret *names* are stored in plain text** (so `ka list` can work without a password). Values never are. Treat names as non-sensitive labels.
-5. **The pop-up window assumes the agent can't control your screen.** If you've given an agent screen-reading *and* keyboard/mouse-injection powers, the window's isolation weakens — your typed password stays hidden, but a yes/no confirmation could theoretically be clicked by such an agent.
-6. **Headless machines fail closed.** No display → no way to approve → the operation is denied. By design.
-7. **Same-user processes share your privileges.** Any program running under your OS account can talk to a live guard session (this is equally true of `ssh-agent`). That's why the guard is designed to never return raw values — the worst a rogue same-user process gets is the same bounded "run a command" capability the legitimate path has. Browser-fill is a separate channel that *can* return passwords, but only to the native host after your per-attempt approval — and only while `ka unlock` is live.
-8. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
-9. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
+2. **Output is not live.** Command output is collected fully, censored, then released — the agent sees it only after the command finishes.
+3. **Secret *names* are stored in plain text** (so `ka list` can work without a password). Values never are. Treat names as non-sensitive labels.
+4. **The pop-up window assumes the agent can't control your screen.** If you've given an agent screen-reading *and* keyboard/mouse-injection powers, the window's isolation weakens — your typed password stays hidden, but a yes/no confirmation could theoretically be clicked by such an agent. The same caveat applies to the guard's admission prompt.
+5. **Headless machines fail closed.** No display → no way to approve → the operation is denied. By design.
+6. **Same-user processes share your privileges.** Any program running under your OS account can talk to a live guard session (this is equally true of `ssh-agent`). That's why the guard is designed to never return raw values — the worst a rogue same-user process gets is the same bounded "run a command" capability the legitimate path has, and even that requires one admission prompt to be approved on your own screen first.
+7. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
+8. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
 
 ## CLI appearance
 

@@ -9,7 +9,22 @@ import threading
 import time
 
 from key_amnesia import ipc
-from key_amnesia.guard import GuardState, guard_handle_message
+from key_amnesia.guard import AdmittedSession, GuardState, guard_handle_message
+
+ADMITTED_TOKEN = "test-admitted-token"
+
+
+def _admitted(**kwargs) -> GuardState:
+    """A GuardState pre-seeded with a known admitted token.
+
+    Every test below sends ADMITTED_TOKEN in `admission_token` so the
+    admission-consent layer (see test_guard_admission.py) is skipped and the
+    verb dispatch under test runs unconditionally, exactly like before v3's
+    admission layer was added.
+    """
+    state = GuardState(**kwargs)
+    state.admitted = AdmittedSession(token=ADMITTED_TOKEN, first_seen="2026-01-01T00:00:00+00:00")
+    return state
 
 
 def test_ipc_round_trip_authkey_only() -> None:
@@ -43,7 +58,7 @@ def test_ipc_round_trip_authkey_only() -> None:
 
 
 def test_guard_handle_never_returns_raw_values() -> None:
-    state = GuardState(
+    state = _admitted(
         secrets={"api_key": "super-secret-value-123"},
         expires_at=time.time() + 600,
         address="dummy",
@@ -51,7 +66,9 @@ def test_guard_handle_never_returns_raw_values() -> None:
     )
     # Crafted client asking for values
     for verb in ("get-value", "reveal", "get", "copy"):
-        reply = guard_handle_message({"verb": verb, "name": "api_key"}, state)
+        reply = guard_handle_message(
+            {"verb": verb, "name": "api_key", "admission_token": ADMITTED_TOKEN}, state
+        )
         assert reply.get("ok") is False
         blob = str(reply)
         assert "super-secret-value-123" not in blob
@@ -64,6 +81,7 @@ def test_guard_handle_never_returns_raw_values() -> None:
             "secret_names": ["api_key"],
             "inject_as": {"api_key": "API_KEY"},
             "command": [sys.executable, "-c", code],
+            "admission_token": ADMITTED_TOKEN,
         },
         state,
     )
@@ -81,7 +99,7 @@ def test_guard_run_honors_caller_cwd() -> None:
     message, `ka run` silently executed in the guard's directory instead of the
     directory the `run` command was actually issued from.
     """
-    state = GuardState(
+    state = _admitted(
         secrets={},
         expires_at=time.time() + 600,
         address="dummy",
@@ -95,6 +113,7 @@ def test_guard_run_honors_caller_cwd() -> None:
             "secret_names": [],
             "command": [sys.executable, "-c", code],
             "cwd": target_dir,
+            "admission_token": ADMITTED_TOKEN,
         },
         state,
     )
@@ -106,7 +125,7 @@ def test_guard_run_honors_caller_cwd() -> None:
 
 def test_guard_run_without_cwd_falls_back_to_guard_process_cwd() -> None:
     """Omitting `cwd` (older client / explicit choice) must not raise or misbehave."""
-    state = GuardState(
+    state = _admitted(
         secrets={},
         expires_at=time.time() + 600,
         address="dummy",
@@ -117,6 +136,7 @@ def test_guard_run_without_cwd_falls_back_to_guard_process_cwd() -> None:
             "verb": "run",
             "secret_names": [],
             "command": [sys.executable, "-c", "print('ok')"],
+            "admission_token": ADMITTED_TOKEN,
         },
         state,
     )
@@ -125,13 +145,15 @@ def test_guard_run_without_cwd_falls_back_to_guard_process_cwd() -> None:
 
 
 def test_guard_list_names_only() -> None:
-    state = GuardState(
+    state = _admitted(
         secrets={"a": "secretA", "b": "secretB"},
         expires_at=time.time() + 600,
         address="dummy",
         authkey=b"y" * 32,
     )
-    reply = guard_handle_message({"verb": "list"}, state)
+    reply = guard_handle_message(
+        {"verb": "list", "admission_token": ADMITTED_TOKEN}, state
+    )
     assert reply["ok"] is True
     assert reply["names"] == ["a", "b"]
     assert "secretA" not in str(reply)
@@ -140,16 +162,16 @@ def test_guard_list_names_only() -> None:
 
 def test_password_never_in_ipc_payloads() -> None:
     """Guard handler responses must not contain password-like fields."""
-    state = GuardState(
+    state = _admitted(
         secrets={"k": "v"},
         expires_at=time.time() + 600,
         address="dummy",
         authkey=b"z" * 32,
     )
     for msg in (
-        {"verb": "status"},
-        {"verb": "list"},
-        {"verb": "renew", "minutes": 5},
+        {"verb": "status", "admission_token": ADMITTED_TOKEN},
+        {"verb": "list", "admission_token": ADMITTED_TOKEN},
+        {"verb": "renew", "minutes": 5, "admission_token": ADMITTED_TOKEN},
     ):
         reply = guard_handle_message(msg, state)
         assert "password" not in reply

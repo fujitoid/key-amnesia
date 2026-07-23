@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import json
-import secrets
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from key_amnesia import crypto
+from key_amnesia import theme
 from key_amnesia.paths import names_path, vault_path
 
 MAGIC = b"KAM1"
 VERSION = 1
 HEADER_FMT = "<4sB16sQQ"  # magic, version, salt, opslimit, memlimit
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
+
+# Obsolete browser-fill payload keys, removed in 0.3.0. Dropped on load/save
+# so old vaults migrate forward automatically; see _normalize_payload.
+_OBSOLETE_FILL_KEYS = ("logins", "browser_associations", "database_id")
 
 
 class VaultError(Exception):
@@ -26,31 +30,33 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def new_database_id() -> str:
-    """Stable hex id for KeePassXC get-databasehash."""
-    return secrets.token_hex(32)
-
-
 def empty_payload() -> dict[str, Any]:
     now = _utc_now_iso()
     return {
         "secrets": {},
-        "logins": [],
-        "browser_associations": [],
-        "database_id": new_database_id(),
         "created_at": now,
         "updated_at": now,
     }
 
 
-def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Default additive v2 fields for vaults created before logins schema."""
-    if not isinstance(payload.get("logins"), list):
-        payload["logins"] = []
-    if not isinstance(payload.get("browser_associations"), list):
-        payload["browser_associations"] = []
-    if not payload.get("database_id"):
-        payload["database_id"] = new_database_id()
+def _normalize_payload(payload: dict[str, Any], *, warn: bool = True) -> dict[str, Any]:
+    """Drop obsolete browser-fill keys (removed in 0.3.0) before use.
+
+    Prints a one-time informational notice only when there was a non-empty
+    ``logins`` list to actually lose; empty/absent obsolete keys are dropped
+    silently. Callers that immediately re-save the payload (e.g. ``load_vault``
+    followed by a mutation + ``save_vault``) should only warn once — pass
+    ``warn=False`` on the save-side normalization.
+    """
+    if any(key in payload for key in _OBSOLETE_FILL_KEYS):
+        logins = payload.get("logins")
+        if warn and isinstance(logins, list) and logins:
+            theme.info(
+                "Removed obsolete login associations - browser-fill was "
+                "removed in 0.3.0."
+            )
+        for key in _OBSOLETE_FILL_KEYS:
+            payload.pop(key, None)
     return payload
 
 
@@ -114,7 +120,9 @@ def save_vault(
         opslimit=opslimit,
         memlimit=memlimit,
     )
-    body = _normalize_payload(dict(payload))
+    # Silent here: load_vault already surfaced the migration notice (if any)
+    # on the read side of a load-then-save round trip.
+    body = _normalize_payload(dict(payload), warn=False)
     if "created_at" not in body:
         body["created_at"] = _utc_now_iso()
     body["updated_at"] = _utc_now_iso()

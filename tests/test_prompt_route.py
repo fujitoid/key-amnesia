@@ -18,7 +18,6 @@ from key_amnesia.prompt_route import (
     ENV_PARENT_PID,
     ENV_REQUEST,
     PromptRequest,
-    require_browser_fill_approval,
     require_human_auth,
 )
 
@@ -134,26 +133,6 @@ def test_inline_auth_times_out_when_tty_but_nobody_answers(ka_home, monkeypatch)
     assert outcome.ok is False
     assert "timed out" in (outcome.reason or "").lower()
     assert elapsed < 3  # bounded by timeout_s, not the 5s hang
-
-
-def test_browser_fill_approve_times_out_when_tty_but_nobody_answers(monkeypatch) -> None:
-    """Same tty-shaped-but-nobody-there risk applies to the approval prompt."""
-
-    def hanging_input(prompt: str = "") -> str:
-        time.sleep(5)
-        return "y"
-
-    monkeypatch.setattr("builtins.input", hanging_input)
-
-    req = PromptRequest(action="browser-fill-approve", secret_names=["x"])
-    start = time.monotonic()
-    outcome = require_browser_fill_approval(req, timeout_s=1, isatty_fn=lambda: True)
-    elapsed = time.monotonic() - start
-
-    assert outcome.ok is False
-    assert "timed out" in (outcome.reason or "").lower()
-    assert outcome.status_only == {"approved": False, "action": "browser-fill-approve"}
-    assert elapsed < 3
 
 
 def test_helper_parent_death_cancels(monkeypatch) -> None:

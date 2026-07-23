@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from key_amnesia import __version__
+from key_amnesia import crypto
 from key_amnesia.audit import audit_event
 from key_amnesia.config import ConfigError, load_config, set_config_value
 from key_amnesia.paths import vault_path
@@ -39,6 +40,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "init",
         help="Create an empty vault (double-confirm master password)",
+    )
+
+    # passwd / change-password
+    sub.add_parser(
+        "passwd",
+        aliases=["change-password"],
+        help="Change the master password (re-encrypts the vault with a fresh salt)",
     )
 
     # set
@@ -110,16 +118,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # status
     sub.add_parser("status", help="Show guard session status")
 
-    # Phase 0 seams — handlers filled by later workstreams
-    from key_amnesia.login_cli import build_login_parser
-    from key_amnesia.native_host_install import build_browser_fill_parser
-
-    build_login_parser(sub)
-    build_browser_fill_parser(sub)
-
-    # internal helpers (still support --help; omitted from epilog summary)
+    # internal helper (still supports --help; omitted from epilog summary)
     sub.add_parser("_prompt-helper", help=argparse.SUPPRESS)
-    sub.add_parser("_guard", help=argparse.SUPPRESS)
 
     return parser
 
@@ -410,7 +410,14 @@ def cmd_list(_args: argparse.Namespace) -> int:
 
 
 def cmd_unlock(_args: argparse.Namespace) -> int:
-    from key_amnesia.guard import guard_is_alive, start_guard_process
+    """`ka unlock` *is* the guard: it decrypts, then blocks in this terminal.
+
+    No detached child process, no bootstrap-env handoff. A non-interactive
+    caller (agent-invoked) is routed the usual way — inline vs. spawned
+    console — but a spawned helper console refuses the unlock action itself
+    (a separate console can't become this terminal's foreground guard).
+    """
+    from key_amnesia.guard import guard_is_alive, run_foreground_guard
 
     if guard_is_alive():
         theme.warn("Guard session already active.")
@@ -433,35 +440,34 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
             payload = load_vault(None, password)
         except VaultError as e:
             theme.error(f"Error: {e}")
-            return 1
-        try:
-            pid = start_guard_process(payload, timeout_min)
-        except Exception as e:  # noqa: BLE001
-            theme.error(f"Failed to start guard: {e}")
+            audit_event(
+                "unlock", route=outcome.route, result="denied", reason=str(e)
+            )
             return 1
         audit_event("unlock", route=outcome.route, result="allowed")
-        theme.success(f"Unlocked (guard pid {pid}, timeout {timeout_min}m).")
-        return 0
+        return run_foreground_guard(payload, timeout_min)
 
-    if outcome.status_only and outcome.status_only.get("action") == "unlock":
-        theme.success(f"Unlocked (timeout {timeout_min}m).")
-        return 0
     theme.error(f"Denied: {outcome.reason or 'unlock failed'}")
     return 1
 
 
 def cmd_lock(_args: argparse.Namespace) -> int:
-    from key_amnesia.browser_fill import clear_browser_fill_lock
-    from key_amnesia.guard import clear_guard_lock, guard_is_alive, guard_request
+    from key_amnesia.guard import (
+        clear_admission_token,
+        clear_guard_lock,
+        format_no_guard_message,
+        guard_is_alive,
+        guard_request,
+    )
 
     if not guard_is_alive():
         clear_guard_lock()
-        clear_browser_fill_lock()
-        theme.info("No active guard session.")
+        clear_admission_token()
+        theme.info(format_no_guard_message())
         return 0
     resp = guard_request({"verb": "lock"})
     clear_guard_lock()
-    clear_browser_fill_lock()
+    clear_admission_token()
     if resp and resp.get("ok"):
         theme.success("Locked.")
         return 0
@@ -591,11 +597,17 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
-    from key_amnesia.guard import guard_is_alive, guard_request, read_guard_lock
+    from key_amnesia.guard import (
+        format_no_guard_message,
+        guard_is_alive,
+        guard_request,
+        read_guard_lock,
+    )
 
     lock = read_guard_lock()
     if not lock or not guard_is_alive(lock):
         theme.out("guard: inactive")
+        theme.out(format_no_guard_message())
         cfg = load_config()
         theme.out(f"session-mode: {cfg.get('session-mode')}")
         return 0
@@ -605,9 +617,60 @@ def cmd_status(_args: argparse.Namespace) -> int:
         theme.out(f"pid: {resp.get('pid')}")
         theme.out(f"expires_at: {resp.get('expires_at')}")
         theme.out(f"secret_count: {resp.get('secret_count')}")
+        theme.out(f"admitted: {'yes' if resp.get('admitted') else 'no'}")
+        if resp.get("admitted_since"):
+            theme.out(f"admitted_since: {resp.get('admitted_since')}")
+        theme.out(f"request_count: {resp.get('request_count', 0)}")
     else:
         theme.out(f"pid: {lock.get('pid')}")
         theme.out(f"expires_at: {lock.get('expires_at')}")
+    return 0
+
+
+def cmd_passwd(_args: argparse.Namespace) -> int:
+    """Change the master password: re-encrypts the vault with a fresh salt.
+
+    Refuses outright while a guard session is alive (the guard holds the
+    old-password-derived key in memory and would go stale mid-session), and
+    is TTY-only like `ka init` — never routed through the spawned-console
+    helper, since the master password can never leave this process either
+    way.
+    """
+    from key_amnesia.guard import guard_is_alive
+
+    if guard_is_alive():
+        theme.error("Lock the vault first: ka lock")
+        return 1
+
+    vp = vault_path()
+    if not vp.exists():
+        theme.error("Vault not initialized. Run 'ka init' first.")
+        return 1
+    if not sys.stdin.isatty():
+        theme.error(
+            "Error: ka passwd requires an interactive terminal "
+            "(run it directly in your console)."
+        )
+        return 1
+
+    current_password = getpass.getpass("Current master password: ")
+    try:
+        payload = load_vault(vp, current_password)
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        audit_event("passwd", route="inline", result="denied", reason=str(e))
+        return 1
+
+    new_password = _prompt_new_master_password()
+    if new_password is None:
+        audit_event(
+            "passwd", route="inline", result="denied", reason="new password rejected"
+        )
+        return 1
+
+    save_vault(vp, new_password, payload, salt=crypto.generate_salt())
+    audit_event("passwd", route="inline", result="allowed")
+    theme.success("Master password changed.")
     return 0
 
 
@@ -623,21 +686,11 @@ def main(argv: list[str] | None = None) -> int:
         from key_amnesia.prompt_route import run_prompt_helper
 
         return run_prompt_helper()
-    if args.command == "_guard":
-        from key_amnesia.guard import run_guard_main
-
-        return run_guard_main()
-    if args.command == "login":
-        from key_amnesia.login_cli import main as login_main
-
-        return login_main(args)
-    if args.command == "browser-fill":
-        from key_amnesia.native_host_install import main as browser_fill_main
-
-        return browser_fill_main(args)
 
     handlers = {
         "init": cmd_init,
+        "passwd": cmd_passwd,
+        "change-password": cmd_passwd,
         "set": cmd_set,
         "remove": cmd_remove,
         "run": cmd_run,
