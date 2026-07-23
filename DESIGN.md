@@ -1,8 +1,10 @@
-# key-amnesia v2 — Design
+# key-amnesia v3 — Design
 
-Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted vault storage, Windows `CREATE_NEW_CONSOLE` human-prompt routing, a bounded-capability cached guard over named-pipe IPC (authkey only), buffer-then-scrub output redaction, and KeePassXC-Browser Native Messaging fill (separate browser-fill IPC; guard verbs unchanged).
+Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted vault storage, Windows `CREATE_NEW_CONSOLE` human-prompt routing, a bounded-capability cached guard over named-pipe IPC (authkey only, plus an in-memory admission-consent layer), and buffer-then-scrub output redaction.
 
-**Out of scope for v2:** macOS (and Safari); forking/modifying the KeePassXC-Browser extension; atomic fill+submit; passkeys / TOTP / create-new-group; extension-driven `set-login` (stubbed — CLI `ka login add` is the only create path); per-call / no-session browser-fill (hard-require `ka unlock`); MCP wrapper; GUI; macOS isolated-console spawn (`Terminal.app` / `osascript`); DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
+**0.3.0 cut:** browser-fill and the entire KeePassXC-Browser Native Messaging integration (`browser_fill.py`, `native_host.py`, `native_host_install.py`, `keepass_protocol.py`, `logins.py`, `login_cli.py`, `ka login`, `ka browser-fill`) are removed. `ka unlock` is no longer a detached child process — it *is* the guard, running in the caller's own foreground terminal. New: `ka passwd` / `ka change-password`, admission-consent prompting on the guard's own TTY, and honest death reporting (`last_guard_state.json`).
+
+**Out of scope:** macOS (and Safari); browser integration of any kind (removed, not deferred — see above); passkeys / TOTP; MCP wrapper; GUI; macOS isolated-console spawn (`Terminal.app` / `osascript`); DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
 
 ---
 
@@ -24,18 +26,12 @@ key-amnesia/
     paths.py
     config.py
     crypto.py                      # Argon2id + SecretBox (vault only)
-    vault.py                       # binary layout + JSON payload
+    vault.py                       # binary layout + JSON payload; migrates obsolete fill keys
     scrub.py                       # exact substring replace, no regex
-    audit.py                       # JSONL; browser-fill taxonomy never logs passwords
-    ipc.py                         # Listener/Client + authkey only (guard + fill addresses)
-    prompt_route.py                # isatty + CREATE_NEW_CONSOLE; env handoff; browser-fill-approve
-    guard.py                       # verbs frozen; co-hosts fill Listener
-    browser_fill.py                # second Listener; may return credentials after approval
-    logins.py                      # encrypted login CRUD / URL host match
-    login_cli.py                   # ka login … (WS-C)
-    native_host.py                 # KeePassXC-Browser host entry (WS-A)
-    native_host_install.py         # ka browser-fill install/status (WS-B)
-    keepass_protocol.py            # NaCl box framing (WS-A)
+    audit.py                       # JSONL; never logs passwords
+    ipc.py                         # Listener/Client + authkey only
+    prompt_route.py                # isatty + CREATE_NEW_CONSOLE; env handoff
+    guard.py                       # foreground singleton; admission consent; death reporting
     run_exec.py                    # buffer-then-scrub-then-relay
     clipboard.py
     theme.py                       # branded CLI output (NO_COLOR / non-TTY safe)
@@ -43,7 +39,7 @@ key-amnesia/
   tests/
 ```
 
-Entry points: `key-amnesia` and `ka` both → `key_amnesia.cli:main`; `key-amnesia-browser-host` → `key_amnesia.native_host:main`.
+Entry points: `key-amnesia` and `ka` both → `key_amnesia.cli:main`.
 
 Deps: `pynacl`, `pyperclip`. Dev: `pytest`.
 
@@ -59,30 +55,29 @@ Deps: `pynacl`, `pyperclip`. Dev: `pytest`.
 magic[4]="KAM1" | version[1]=1 | salt[16] | opslimit[8] LE | memlimit[8] LE | SecretBox blob
 ```
 
-Payload JSON (v2 additive fields default on load for older vaults):
+Payload JSON:
 
 ```json
 {
   "secrets": {"NAME": "value", ...},
-  "logins": [{"url": "https://example.com", "username": "u", "secret_name": "NAME"}],
-  "browser_associations": [{"id": "key-amnesia", "id_key_b64": "..."}],
-  "database_id": "<stable hex>",
   "created_at": "...",
   "updated_at": "..."
 }
 ```
 
-Logins reference `secret_name` (no password duplication; no plaintext url/username sidecar). Domain match: equal hostnames, or `request_host.endswith("." + login_host)` (subdomain of stored host). Scheme/port ignored.
+**Migration from pre-0.3.0 vaults:** older payloads may still carry `logins` / `browser_associations` / `database_id` from the removed browser-fill feature. `_normalize_payload` (in `vault.py`) drops all three on every `load_vault` / `save_vault`. If `logins` was a non-empty list, `load_vault` prints a one-time `theme.info` notice (`"Removed obsolete login associations - browser-fill was removed in 0.3.0."`); empty/absent keys are dropped silently. The save side never re-prints (a load-then-mutate-then-save round trip in the same command only warns once), but a save always persists the cleanup — a vault touched once under 0.3.0 has no legacy keys on disk from then on.
 
 KDF: `argon2id.kdf` with **OPSLIMIT_SENSITIVE / MEMLIMIT_SENSITIVE only** (deliberate; never dial down). Dir `~/.key-amnesia/` with `0o700` on POSIX; Windows user-profile ACL defaults.
 
 **Creation is explicit, not implicit.** `ka init` is the only path that creates a vault: it requires an interactive TTY (refuses non-interactively — vault creation is never routed through the spawned-console/agent flow at all, unlike every other privileged command), prompts for the master password **twice**, and only writes the vault if both entries match exactly; a mismatch aborts with nothing created. `ka set` refuses with a clear error (`"Vault not initialized. Run 'ka init' first."`) if no vault exists yet — it never creates one as a side effect. This replaced an earlier v0 gap where the first `ka set` call silently created the vault from a single, unconfirmed password entry (a typo there was permanent and undetectable until the next unlock attempt failed, with no recovery path since Argon2id + SecretBox provide none by design).
 
+**Changing the master password.** `ka passwd` (alias `ka change-password`) re-encrypts the vault under a new password with a **fresh** Argon2id salt (`save_vault(..., salt=crypto.generate_salt())` — `save_vault` otherwise preserves the existing salt on a same-password re-save). TTY-only like `init` (never routed through the spawned-console helper — the master password never needs to leave this process either way). Refuses outright while a guard session is alive (`theme.error("Lock the vault first: ka lock")`) rather than letting the guard's in-memory key go stale mid-session.
+
 ### Names sidecar (prompt-free `list`)
 
 Whole-vault AEAD cannot list names without the password. Sidecar `~/.key-amnesia/vault.names.json` = `{"names":[...]}` updated on every successful `set`/`remove`.
 
-**Tradeoff:** secret *names* are plaintext at rest on disk; values never are. Acceptable for v1 to keep `list` agent-callable with no prompt. Future option (DPAPI-protect sidecar on Windows) is explicitly out of scope for v1.
+**Tradeoff:** secret *names* are plaintext at rest on disk; values never are. Acceptable to keep `list` agent-callable with no prompt. Future option (DPAPI-protect sidecar on Windows) remains out of scope.
 
 ### Config (`config.json`)
 
@@ -94,15 +89,17 @@ Whole-vault AEAD cannot list names without the password. Sidecar `~/.key-amnesia
 
 **No `session_key_hex`.** Authkey authentication alone defines the IPC trust boundary. An extra SecretBox layer over messages was dropped: with a session key co-stored in `guard.lock` next to the authkey, the same processes that can read the authkey can read the session key — zero added protection, pure complexity.
 
-### Browser-fill lock (`browser_fill.lock`)
+### Admission token (`admitted_session.token`)
 
-Same shape as the guard lock (`address`, `authkey_hex`, `pid`, `expires_at`), distinct pipe/socket (`key-amnesia-fill-<hex>`). Authkey only. Started only as the second Listener inside the cached-mode guard child from `ka unlock`. `ka lock`, fill-IPC `lock`, and guard expiry tear down **both** listeners and delete **both** lock files — no residual fill window after lock/expiry.
+Opaque `secrets.token_urlsafe(32)` string minted by the guard the first time it admits a client (see "Admission consent" below), cached on disk by the *client* side (`guard_request`) so subsequent CLI invocations in the same shell skip the prompt. Not a security boundary by itself (same-user readable, same trust tier as `guard.lock`) — it is a **UX/consent** layer on top of the authkey boundary, not a replacement for it. Cleared by the guard on `lock` / any teardown; a stale token from a previous guard run is simply unrecognized and re-prompts (harmless).
+
+### Last guard state (`last_guard_state.json`)
+
+Written by the guard on **every** exit path — `started_at`, `ended_at`, `reason` (`locked` / `expired` / `interrupted` / `crashed: <ExcType>`), `request_count`. Read by `format_no_guard_message()` so `ka lock` / `ka status` report what actually happened (`"Guard is not running. Last session ended 14:32 (expired after 30m, handled 4 requests)."`) instead of a bare "No active guard session."
 
 ### Audit (`audit.log` JSONL)
 
-`timestamp`, `action`, `secret_names`, `command`, `route` (`inline`|`spawned-console`|`guard-session`), `result` (`allowed`|`denied`|`timeout`), `reason`. Never secret values.
-
-Browser-fill actions: `browser-fill` / `browser-fill-denied` / `browser-fill-timeout`, with optional `url` (or host) and `username`. **Passwords must never appear in audit.log** (they may appear in the Native Messaging protocol response to the extension only).
+`timestamp`, `action`, `secret_names`, `command`, `route` (`inline`|`spawned-console`|`guard-session`), `result` (`allowed`|`denied`|`timeout`), `reason`. Never secret values, never passwords.
 
 ---
 
@@ -121,14 +118,16 @@ Needs human auth
               → helper already did KDF locally; status-only reply
 ```
 
-**Known limitation: `isatty()` is a heuristic, not a guarantee of an attentive human.** The routing above assumes a tty-shaped stdin means a real person is present to type a password inline. In practice a pseudo-terminal can exist with nobody actually watching it — observed with an AI coding agent whose own tool harness sometimes allocates a pty for a subprocess it invokes, unpredictably from the caller's side. When that happens, `key-amnesia` takes the inline branch and prints the prompt into a stream nobody reads. **Not fixed** (no reliable way to distinguish "tty-shaped" from "someone is actually there" from inside the process) — same category as the base64-scrubbing and adversarial-DOM-observer caveats elsewhere in this doc, named honestly rather than silently left as a mystery. **What is fixed:** the consequence used to be an indefinite hang (`getpass`/`input` block forever with no timeout); both inline password entry and the browser-fill inline approval prompt now run on a `prompt-timeout-seconds`-bounded thread and fail closed with a clear "prompt timed out" / "approval timed out" outcome instead of hanging.
+**`unlock` is the one action a spawned helper console cannot complete.** `ka unlock` blocks in the *caller's own terminal* for the life of the session — a separate spawned console is a different process with a different TTY, so it cannot become that guard on the parent's behalf. A non-interactive `unlock` still routes through the same isatty/spawn logic as every other command (so the routing decision, and its audit trail, stay uniform), but the helper's `unlock` handler refuses immediately with a clear reason (`"unlock must be run in a foreground terminal"`) instead of trying to start anything.
+
+**Known limitation: `isatty()` is a heuristic, not a guarantee of an attentive human.** The routing above assumes a tty-shaped stdin means a real person is present to type a password inline. In practice a pseudo-terminal can exist with nobody actually watching it — observed with an AI coding agent whose own tool harness sometimes allocates a pty for a subprocess it invokes, unpredictably from the caller's side. When that happens, `key-amnesia` takes the inline branch and prints the prompt into a stream nobody reads. **Not fixed** (no reliable way to distinguish "tty-shaped" from "someone is actually there" from inside the process) — named honestly rather than silently left as a mystery. **What is fixed:** the consequence used to be an indefinite hang (`getpass`/`input` block forever with no timeout); inline password entry now runs on a `prompt-timeout-seconds`-bounded thread and fails closed with a clear "prompt timed out" outcome instead of hanging. The guard's own admission prompt (see below) uses the same bounded-thread pattern with a fixed 60s timeout.
 
 ### Nothing sensitive on argv — ever
 
 Windows process-creation auditing (event 4688) and same-user process explorers record full command lines. Argv is an accidental persistence/exposure channel.
 
 - Helper argv is **only** the bare subcommand: `key-amnesia _prompt-helper` (plus interpreter/module path as needed by the entry point).
-- Pass request payload, authkey, reply address, parent PID, etc. via **environment variables** set on the `Popen` `env=` dict (not captured by 4688). Clear those env vars from the helper’s view after reading if practical.
+- Pass request payload, authkey, reply address, parent PID, etc. via **environment variables** set on the `Popen` `env=` dict (not captured by 4688). Clear those env vars from the helper's view after reading if practical.
 - Same rule everywhere else: no keys, no request JSON, no secret names, no secret values on any command line.
 
 Helper behavior after env handoff:
@@ -142,29 +141,64 @@ Helper behavior after env handoff:
 
 ## Output scrubbing (buffer-then-scrub-then-relay)
 
-**No streaming in v1.** For every `run` path (CLI per-call, helper per-call, guard):
+**No streaming.** For every `run` path (CLI per-call, helper per-call, guard):
 
-1. Collect the child’s stdout and stderr **fully** as bytes (`communicate()` / equivalent).
+1. Collect the child's stdout and stderr **fully** as bytes (`communicate()` / equivalent).
 2. Decode each stream once at the end.
 3. Scrub each stream **independently**.
 4. Scrub with **all** injected secret values (every name→value in the inject set), not just one.
 5. Exact substring replacement only (`str.replace`-style). **Never** build a regex from the secret value.
 6. Relay each scrubbed stream outward in one piece; return exit code.
 
-Command output is **not live** — the agent sees it only after the command exits. Residual limit: deliberately obfuscated echoes (e..g. base64) still slip through.
+Command output is **not live** — the agent sees it only after the command exits. Residual limit: deliberately obfuscated echoes (e.g. base64) still slip through.
 
 ---
 
-## Two-tier security model (v2)
+## Foreground guard singleton + admission consent + honest death reporting (v3)
 
-1. **Hard guarantee (unchanged):** the guard IPC never returns raw secrets; verbs stay exactly `{run, list, lock, status, renew}`. Automated regression asserts this dispatch set (`tests/test_guard_verbs_regression.py`).
-2. **Practical guarantee (new):** after a **mandatory per-attempt human approval popup**, a raw password may be handed to the KeePassXC-Browser extension (an uncontrolled process) over Native Messaging. The value never returns to an agent-invoked CLI context. Residual risk: an adversarial same-browser DOM observer could read autofilled fields — same honest tone as the base64-scrubbing caveat in README.
+`ka unlock` **is** the guard. There is no detached child process, no `_guard` subcommand, and no bootstrap-env handoff (all present in v2, all removed). `run_foreground_guard(payload, timeout_minutes)`:
 
-**Auth precedent (call out by name):** browser-fill **reads** (`get-logins`) are **cached-session-eligible** — an explicit exception to the “always fresh auth” list, **narrowly scoped to reading an already-stored login**. The per-fill approval popup replaces the fresh-password gate **for that read only**. Vault **writes** (`ka set` / `ka login add|remove` / etc.) remain always-fresh-auth. Extension `set-login` is **not** in the exception (stubbed in v2 — return a clear protocol error; create logins only via CLI).
+1. Builds `GuardState` (secrets only — no fill state, ever).
+2. Starts one `multiprocessing.connection.Listener`, writes `guard.lock`.
+3. Prints `"Guard listening (pid …, timeout …m). Waiting for requests..."` on the caller's own terminal.
+4. Blocks in `guard_serve` until locked, expired, or interrupted.
+5. On **every** exit path, writes `last_guard_state.json` with an honest reason before clearing `guard.lock`.
 
-**`ka unlock` hard requirement:** fill listener starts only inside the cached-mode guard child. There is **no** per-call / no-session fill path in v2 (Native Messaging request/response cannot hold a browser call open through a full master-password KDF + `prompt-timeout-seconds` without racing extension host timeouts). When fill IPC is unreachable, the native host returns a protocol “database locked / unavailable” error — it does not spawn a password console.
+A second terminal's `ka unlock` still sees the live lock and soft-warns without starting a second guard (same singleton behavior as v2) — the singleton check is unchanged; only the guard's own execution model (foreground vs. detached-child) changed.
 
-**Host collision:** Native Messaging host name is fixed to `org.keepassxc.keepassxc_browser` (hardcoded by the extension). Only one active host for that name can exist per browser profile. If a foreign manifest already points elsewhere, install must warn and require confirm / `--force` — never silent overwrite.
+### Admission consent — a UX/consent layer above the authkey boundary
+
+The guard's authkey remains the hard security boundary (same-user processes that know the authkey can talk to the guard — the ssh-agent-style limit, unchanged from v2). On top of that, v3 adds a lightweight **consent** layer: the first request from any client is gated by a yes/no prompt printed on the **guard's own foreground TTY** —
+
+```
+Session (pid {caller_pid}) wants: {short_summary}. Admit? [y/N]
+```
+
+— bounded by a 60s `threading.Thread` + `join` (same fail-closed pattern as the inline password prompt); timeout or any non-yes answer denies. On yes, the guard mints an opaque `secrets.token_urlsafe(32)` token, remembers it in-memory (`GuardState.admitted`), and returns it in the reply; the CLI's `guard_request` wrapper (used by every guard-talking command) persists it to `admitted_session.token` automatically. Once admitted, that token skips the prompt for the rest of *this* guard's lifetime — no re-prompting per command. A stale token from a previous guard run is simply unrecognized (re-prompts once, harmless).
+
+`ka status` reports admission state (`admitted: yes/no`, `admitted_since`, `request_count`). The guard also logs one non-secret line per handled request on its own TTY (verb + allowed/denied) — a live activity feed for whoever is sitting at that terminal.
+
+### Honest death reporting
+
+Every guard exit path is wrapped and reported truthfully instead of a bare "no active session":
+
+| Exit path | `last_guard_state.json` reason |
+|---|---|
+| Explicit `lock` verb (IPC) | `locked` |
+| TTL reached | `expired` |
+| `KeyboardInterrupt` (Ctrl+C) | `interrupted` — prints a one-line uptime/request-count/admitted summary on the guard's own TTY, then tears down the same way as `locked` |
+| Any other exception | `crashed: <ExcType>` |
+
+`format_no_guard_message()` (used by `cmd_lock` and `cmd_status`, and any future "no live guard" path) reads that file and produces e.g. `"Guard is not running. Last session ended 14:32 (expired after 30m, handled 4 requests)."` instead of a bare `"No active guard session."`
+
+---
+
+## Two-tier security model
+
+1. **Hard guarantee (unchanged since v1):** the guard IPC never returns raw secrets; verbs stay exactly `{run, list, lock, status, renew}`. Automated regression asserts this dispatch set (`tests/test_guard_verbs_regression.py`).
+2. **Admission consent (new in v3, described above)** is a UX/consent layer, not a second hard guarantee — it never weakens or replaces the authkey boundary, and it never gates *which* verbs exist, only *whether a first-time caller gets to use any of them* without a human noticing.
+
+Browser-fill's "practical guarantee" / auth-precedent exception described in v2 no longer applies — that entire feature (and its narrowly-scoped cached-session read exception) is removed in 0.3.0.
 
 ---
 
@@ -177,19 +211,19 @@ Command output is **not live** — the agent sees it only after the command exit
 | Cached `run` (live guard) | Guard | **Guard** spawns; IPC = scrubbed I/O + exit only |
 | Interactive reveal/copy | CLI | Same console print/clipboard |
 | Non-interactive reveal/copy | Helper | Show/copy **only in helper window**; caller gets status flag only |
-| Browser fill `get-logins` (live unlock) | Guard child / fill Listener | After yes/no approval: credentials → native host → extension only |
+| `ka passwd` | CLI (TTY-only) | Re-encrypts locally; never leaves this process |
 
 Non-interactive per-call `run` makes the helper the one-shot decryptor and executor (bounded result shape, same as the guard path). Secrets are never handed back over IPC to the agent-invoked waiting process.
 
-Guard IPC has **no** `get-value`/`reveal` verb. Same-user processes can talk to the guard (ssh-agent limit); damage is bounded to `run`/`list`/`lock`/session-control only. Browser-fill is a **separate** channel — not a sixth guard verb — and is the only path that may return passwords, and only to the native host after approval.
+Guard IPC has **no** `get-value`/`reveal` verb. Same-user processes can talk to the guard (ssh-agent limit); damage is bounded to `run`/`list`/`lock`/session-control only, and now additionally requires at least one admitted consent prompt per guard lifetime.
 
 ---
 
 ## IPC
 
-`multiprocessing.connection` on `\\.\pipe\key-amnesia-<random>` + `authkey` only. Messages are ordinary pickled/JSON objects over the authenticated connection — **no additional payload SecretBox**. Fill uses a parallel address style (`key-amnesia-fill-<hex>`).
+`multiprocessing.connection` on `\\.\pipe\key-amnesia-<random>` + `authkey` only. Messages are ordinary pickled/JSON objects over the authenticated connection — **no additional payload SecretBox**.
 
-Guard verbs: `run`, `list`, `lock`, `status`, `renew` only.
+Guard verbs: `run`, `list`, `lock`, `status`, `renew` only. Every message additionally carries `caller_pid` (for the admission prompt's display text only — not a trust mechanism) and, once admitted, an `admission_token`.
 
 Master password never appears on this channel in any form. Master password is never satisfiable non-interactively without a spawned console.
 
@@ -197,26 +231,25 @@ Master password never appears on this channel in any form. Master password is ne
 
 ## Session modes
 
-- **per-call (default):** no persistent guard; each privileged op goes through password routing; discard after use. Browser-fill is **unavailable** in this mode (no unlock session).
-- **cached:** `unlock` starts guard holding decrypted vault **and** the browser-fill Listener; timeout from unlock; ~2 min before expiry prompt extend on guard’s TTY if still interactive; `lock` tears down both. Live guard → `run`/`list` skip prompt; live fill → `get-logins-for-url` after per-attempt approval.
+- **per-call (default):** no persistent guard; each privileged op goes through password routing; discard after use.
+- **cached:** `unlock` runs the guard in the caller's own foreground terminal; timeout from unlock; ~2 min before expiry prompt extend on the guard's own TTY if still interactive; `lock` tears it down. Live guard → `run`/`list` skip the password prompt (first use per client still needs one admission consent prompt).
 
-Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`, `remove`, `config set`, **`set`**, and **`login add` / `login list` / `login remove`**. Browser-fill **reads** are the named cached-session exception above (approval popup, not fresh password). Extension `set-login` remains stubbed — not cached-session-eligible.
+Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`, `remove`, `config set`, `set`, and `passwd`.
 
 ---
 
 ## Commands
 
 - `init` — creates the vault; TTY-only (no agent-triggered path), double-confirms the master password, refuses if a vault already exists
+- `passwd` / `change-password` — re-encrypts the vault under a new password with a fresh salt; TTY-only; refuses while a guard session is alive
 - `set` / `remove` — fresh auth; mutate vault + names index; `set` refuses if no vault exists yet rather than creating one implicitly
 - `run --secret/--as ... -- cmd` — guard hit or per-call decrypt path; buffer-then-scrub child stdout/stderr → `***REDACTED(name)***`
 - `list` — read names sidecar (no prompt); never values
-- `unlock` / `lock` — cached session control
+- `unlock` — *is* the guard; blocks in the caller's own terminal until locked/expired/interrupted
+- `lock` — tear down the live guard session (or report the last one's honest fate if none is live)
 - `reveal` / `copy` — always fresh auth; display location follows TTY vs helper rule
-- `login add <url> <username> <secret-name>` — fresh auth; associate an existing secret with a site/username (secret must already exist)
-- `login list` — fresh auth; print url/username/secret_name only (never password values); no prompt-free sidecar
-- `login remove <url> <username>` — fresh auth; drop that association
-- Extension `set-login` is stubbed in v2 — CLI `login add` is the only create path
 - `config set session-mode|session-timeout-minutes` — always fresh auth
+- `status` — live guard status (pid, expiry, secret count, admission state) or the last session's honest death report
 - `_prompt-helper` — internal; bare argv + env handoff; omitted from top-level summary, still supports `--help`
 
 ---
@@ -236,17 +269,19 @@ def run_with_secrets(command: list[str], env_inject: dict[str, str],
 def scrub_text(text: str, secrets: dict[str, str]) -> str: ...
 # exact str.replace for every value; no regex
 
-def guard_handle_message(msg: dict, state: GuardState) -> dict: ...
+def guard_handle_message(msg: dict, state: GuardState, *, admit_prompt=None) -> dict: ...
+def run_foreground_guard(payload: dict, timeout_minutes: int) -> int: ...
+def format_no_guard_message() -> str: ...
 ```
 
 ---
 
 ## Guard never returns raw secret values
 
-The guard and helper IPC replies expose only: status, scrubbed stdout/stderr, exit codes, secret *names*, and session metadata. Never passwords. Never raw secret values. Browser-fill is outside this channel: passwords may leave the fill Listener toward the native host only after approval, and must never be written to `audit.log`.
+The guard and helper IPC replies expose only: status, scrubbed stdout/stderr, exit codes, secret *names*, and session metadata (including admission state). Never passwords. Never raw secret values.
 
 ---
 
 ## Testing
 
-Vault round-trip / wrong password / tamper; `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only); cached-session `run` executes in the caller's cwd (threaded through the IPC message), not the long-lived guard process's own directory; fill lifecycle — `lock`/expiry kills fill IPC with no residual credential window; browser-fill audit actions never contain passwords; `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password/approval prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled (`test_theme.py`).
+Vault round-trip / wrong password / tamper; obsolete browser-fill key migration on load (one-time notice only when `logins` was non-empty, silent drop otherwise, save-side persists the cleanup without a second notice) (`test_vault_migration.py`); `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; `passwd` happy path re-encrypts with a fresh salt, refuses while guard alive, mismatch aborts, wrong current password aborts, TTY-only (`test_passwd_cmd.py`); scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only, admission pre-seeded so verb dispatch itself is under test); cached-session `run` executes in the caller's cwd (threaded through the IPC message); admission-consent prompt approves/denies/times out, known token skips re-prompt, stale token from a different guard re-prompts, round-trips through `guard_request` end to end, `status` reports admission state (`test_guard_admission.py`); honest death reporting for `locked`/`expired`/`interrupted`/`crashed: <ExcType>`, `format_no_guard_message()` phrasing, guard prints its live status banner on start (`test_guard_death_reporting.py`); foreground unlock never spawns a subprocess, a spawned helper console refuses the `unlock` action with a clear reason instead of trying to start anything (`test_foreground_unlock.py`); argparse `--help` walk over the root parser and every subparser renders on a simulated cp1252 console without raising (`test_argparse_help_cp1252.py`); `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled, degrades non-cp1252-encodable caller text instead of crashing (`test_theme.py`).

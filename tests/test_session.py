@@ -11,14 +11,25 @@ import pytest
 
 from key_amnesia.cli import main
 from key_amnesia.guard import (
+    AdmittedSession,
     GuardState,
     clear_guard_lock,
     guard_handle_message,
+    write_admission_token,
     write_guard_lock,
 )
 from key_amnesia.prompt_route import AuthOutcome, PromptRequest, require_human_auth
 from key_amnesia.run_exec import run_with_secrets
 from key_amnesia.vault import load_vault
+
+ADMITTED_TOKEN = "test-admitted-token"
+
+
+def _admit(state: GuardState) -> GuardState:
+    """Pre-seed an admitted session so these tests exercise verb dispatch,
+    not the (separately tested) admission-consent prompt."""
+    state.admitted = AdmittedSession(token=ADMITTED_TOKEN, first_seen="2026-01-01T00:00:00+00:00")
+    return state
 
 
 def test_per_call_run_with_inline_auth(
@@ -53,11 +64,13 @@ def test_per_call_run_with_inline_auth(
 
 def test_guard_run_path_scrubs(seeded_vault: Path, password: str) -> None:
     payload = load_vault(seeded_vault, password)
-    state = GuardState(
-        secrets={k: str(v) for k, v in payload["secrets"].items()},
-        expires_at=time.time() + 600,
-        address="dummy",
-        authkey=b"a" * 32,
+    state = _admit(
+        GuardState(
+            secrets={k: str(v) for k, v in payload["secrets"].items()},
+            expires_at=time.time() + 600,
+            address="dummy",
+            authkey=b"a" * 32,
+        )
     )
     code = (
         "import os, sys\n"
@@ -70,6 +83,7 @@ def test_guard_run_path_scrubs(seeded_vault: Path, password: str) -> None:
             "secret_names": ["api_key", "db_pass"],
             "inject_as": {"api_key": "API_KEY", "db_pass": "DB"},
             "command": [sys.executable, "-c", code],
+            "admission_token": ADMITTED_TOKEN,
         },
         state,
     )
@@ -91,14 +105,20 @@ def test_unlock_run_lock_fallback(
     secrets = {k: str(v) for k, v in payload["secrets"].items()}
 
     listener, address, authkey = ipc.start_listener()
-    state = GuardState(
-        secrets=secrets,
-        expires_at=time.time() + 600,
-        address=address,
-        authkey=authkey,
-        pid=0,
+    state = _admit(
+        GuardState(
+            secrets=secrets,
+            expires_at=time.time() + 600,
+            address=address,
+            authkey=authkey,
+            pid=0,
+        )
     )
     write_guard_lock(address, authkey, 0, state.expires_at)
+    # Client-side cached token so guard_request (used by cmd_run/cmd_lock)
+    # attaches it automatically and skips the admission-consent prompt —
+    # same file the real CLI would have written after a real admission.
+    write_admission_token(ADMITTED_TOKEN)
 
     # Make guard_is_alive True without needing a real PID check
     monkeypatch.setattr(guard_mod, "guard_is_alive", lambda *a, **k: True)

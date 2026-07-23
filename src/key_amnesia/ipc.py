@@ -26,14 +26,6 @@ def make_pipe_address() -> str:
     return f"/tmp/key-amnesia-{token}.sock"
 
 
-def make_fill_pipe_address() -> str:
-    """Return a platform-appropriate browser-fill listener address."""
-    token = secrets.token_hex(8)
-    if sys.platform == "win32":
-        return rf"\\.\pipe\key-amnesia-fill-{token}"
-    return f"/tmp/key-amnesia-fill-{token}.sock"
-
-
 def start_listener(address: str | None = None, authkey: bytes | None = None) -> tuple[Listener, str, bytes]:
     addr = address or make_pipe_address()
     key = authkey if authkey is not None else make_authkey()
