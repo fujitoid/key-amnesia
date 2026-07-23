@@ -49,7 +49,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
     request = PromptRequest(
         action="login-add",
         secret_names=[secret_name],
-        detail=f"{username} @ {url} → {secret_name}",
+        detail=f"{username} @ {url} -> {secret_name}",
     )
     ok, password, outcome = _auth(request)
     if not ok:
@@ -75,11 +75,11 @@ def _cmd_add(args: argparse.Namespace) -> int:
             route=outcome.route,
             result="allowed",
         )
-        theme.success(f"Added login {username} @ {url} → {secret_name}.")
+        theme.success(f"Added login {username} @ {url} -> {secret_name}.")
         return 0
 
     if outcome.status_only and outcome.status_only.get("action") == "login-add":
-        theme.success(f"Added login {username} @ {url} → {secret_name}.")
+        theme.success(f"Added login {username} @ {url} -> {secret_name}.")
         return 0
     theme.error(f"Denied: {outcome.reason or 'login-add failed'}")
     return 1
