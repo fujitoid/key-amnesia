@@ -50,6 +50,47 @@ class _FakePipe:
         return self._buf.getvalue()
 
 
+class _FakeCp1252Console:
+    """Writable stream that actually enforces a legacy codepage encoding.
+
+    Mirrors a real Windows console using cp1252: raises UnicodeEncodeError
+    on any character the codepage can't represent, exactly like the crash
+    this simulates (`→`/`—`/`…` in caller message text).
+    """
+
+    encoding = "cp1252"
+
+    def __init__(self) -> None:
+        self._chunks: list[bytes] = []
+
+    def isatty(self) -> bool:
+        return False
+
+    def write(self, s: str) -> int:
+        self._chunks.append(s.encode(self.encoding))  # raises on unencodable chars
+        return len(s)
+
+    def flush(self) -> None:
+        pass
+
+    def getvalue(self) -> str:
+        return b"".join(self._chunks).decode(self.encoding)
+
+
+def test_unencodable_message_text_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller message containing e.g. an arrow must degrade, never raise,
+    on a stream whose encoding (e.g. a legacy Windows console codepage)
+    can't represent it."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    buf = _FakeCp1252Console()
+    theme.success("Storebox: installed → C:\\path\\manifest.json", file=buf)
+    theme.info("choice — lightest and fastest…", file=buf)
+    out = buf.getvalue()
+    assert "installed" in out
+    assert "C:\\path\\manifest.json" in out
+    assert "lightest and fastest" in out
+
+
 def test_no_color_env_suppresses_escapes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
     buf = _FakeTTY()

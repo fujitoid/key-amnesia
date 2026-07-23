@@ -41,7 +41,7 @@ class BrowserTarget:
     label: str
     family: BrowserFamily
     manifest_path: Path
-    # Windows HKCU relative key under Software\… (None = file-only)
+    # Windows HKCU relative key under Software\... (None = file-only)
     registry_subkey: str | None = None
 
 
@@ -451,7 +451,7 @@ def cmd_install(
         write_manifest(target.manifest_path, payload)
         if plat == "win32" and target.registry_subkey and reg_set is not None:
             reg_set(target.registry_subkey, str(target.manifest_path.resolve()))
-        theme.success(f"{target.label}: installed → {target.manifest_path}")
+        theme.success(f"{target.label}: installed -> {target.manifest_path}")
         installed += 1
 
     theme.info(
@@ -576,7 +576,7 @@ def main(args: argparse.Namespace) -> int:
     """Dispatch ``ka browser-fill`` subcommands."""
     cmd = getattr(args, "browser_fill_command", None)
     if cmd is None:
-        theme.error("Usage: ka browser-fill {install|status|uninstall} …")
+        theme.error("Usage: ka browser-fill {install|status|uninstall} ...")
         return 2
     if cmd == "status":
         return cmd_status()

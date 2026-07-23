@@ -196,7 +196,15 @@ def _emit(msg: Any, *, stream: TextIO, style: str | None = None, **kwargs: Any) 
     # style None / "err": plain (no accent)
 
     kwargs.setdefault("file", stream)
-    print(text, **kwargs)
+    try:
+        print(text, **kwargs)
+    except UnicodeEncodeError:
+        # Stream encoding (e.g. a legacy non-UTF-8 Windows console codepage)
+        # can't represent a character in caller-supplied text — degrade the
+        # unencodable characters rather than crash the command outright.
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe, **kwargs)
 
 
 def info(msg: Any = "", **kwargs: Any) -> None:

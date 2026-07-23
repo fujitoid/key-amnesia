@@ -203,6 +203,7 @@ def guard_handle_message(msg: dict[str, Any], state: GuardState) -> dict[str, An
         secret_names = list(msg.get("secret_names") or [])
         inject_as = dict(msg.get("inject_as") or {})
         command = list(msg.get("command") or [])
+        cwd = msg.get("cwd") or None
         if not command:
             return {"ok": False, "reason": "no command"}
         missing = [n for n in secret_names if n not in state.secrets]
@@ -220,7 +221,7 @@ def guard_handle_message(msg: dict[str, Any], state: GuardState) -> dict[str, An
             inject_as.get(n, n): state.secrets[n] for n in secret_names
         }
         by_name = {n: state.secrets[n] for n in secret_names}
-        result = run_with_secrets(command, env_inject, by_name)
+        result = run_with_secrets(command, env_inject, by_name, cwd=cwd)
         audit_event(
             "run",
             secret_names=secret_names,

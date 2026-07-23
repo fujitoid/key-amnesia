@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -318,6 +319,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "secret_names": secret_names,
                 "inject_as": inject_as,
                 "command": cmd,
+                "cwd": os.getcwd(),
             },
             timeout=3600,
         )

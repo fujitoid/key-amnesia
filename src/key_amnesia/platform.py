@@ -155,7 +155,7 @@ def _offer_linux_emulator_install(
         theme.info("Choose a terminal emulator to install:", file=tty)
         for i, name in enumerate(_LINUX_EMULATORS, start=1):
             desc = _LINUX_EMULATOR_DESCRIPTIONS.get(name, "")
-            theme.info(f"  {i}) {name} — {desc}", file=tty)
+            theme.info(f"  {i}) {name} - {desc}", file=tty)
         skip_n = len(_LINUX_EMULATORS) + 1
         theme.info(f"  {skip_n}) skip, don't install anything", file=tty)
 

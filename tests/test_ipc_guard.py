@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import threading
 import time
 
@@ -69,6 +71,57 @@ def test_guard_handle_never_returns_raw_values() -> None:
     assert "super-secret-value-123" not in reply["scrubbed_stdout"]
     assert "***REDACTED(api_key)***" in reply["scrubbed_stdout"]
     assert "super-secret-value-123" not in str(reply)
+
+
+def test_guard_run_honors_caller_cwd() -> None:
+    """A cached-session `run` must execute in the caller's cwd, not the guard's own.
+
+    Regression: the guard is a long-lived process started by `ka unlock`, wherever
+    that happened to run from. Without threading the caller's cwd through the IPC
+    message, `ka run` silently executed in the guard's directory instead of the
+    directory the `run` command was actually issued from.
+    """
+    state = GuardState(
+        secrets={},
+        expires_at=time.time() + 600,
+        address="dummy",
+        authkey=b"c" * 32,
+    )
+    target_dir = tempfile.mkdtemp()
+    code = "import os, sys; sys.stdout.write(os.getcwd())"
+    reply = guard_handle_message(
+        {
+            "verb": "run",
+            "secret_names": [],
+            "command": [sys.executable, "-c", code],
+            "cwd": target_dir,
+        },
+        state,
+    )
+    assert reply["ok"] is True
+    got = os.path.normcase(os.path.realpath(reply["scrubbed_stdout"]))
+    want = os.path.normcase(os.path.realpath(target_dir))
+    assert got == want
+
+
+def test_guard_run_without_cwd_falls_back_to_guard_process_cwd() -> None:
+    """Omitting `cwd` (older client / explicit choice) must not raise or misbehave."""
+    state = GuardState(
+        secrets={},
+        expires_at=time.time() + 600,
+        address="dummy",
+        authkey=b"d" * 32,
+    )
+    reply = guard_handle_message(
+        {
+            "verb": "run",
+            "secret_names": [],
+            "command": [sys.executable, "-c", "print('ok')"],
+        },
+        state,
+    )
+    assert reply["ok"] is True
+    assert "ok" in reply["scrubbed_stdout"]
 
 
 def test_guard_list_names_only() -> None:

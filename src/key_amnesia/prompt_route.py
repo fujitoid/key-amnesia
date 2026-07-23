@@ -64,7 +64,7 @@ def _isatty() -> bool:
         return False
 
 
-def _prompt_password_inline(request: PromptRequest) -> str:
+def _prompt_password_inline(request: PromptRequest, timeout_s: int | None = None) -> str:
     theme.info(
         f"key-amnesia: authentication required for '{request.action}'",
         file=sys.stderr,
@@ -73,7 +73,29 @@ def _prompt_password_inline(request: PromptRequest) -> str:
         theme.info(f"  secrets: {', '.join(request.secret_names)}", file=sys.stderr)
     if request.detail:
         theme.info(f"  {request.detail}", file=sys.stderr)
-    return getpass.getpass("Master password: ")
+
+    if timeout_s is None:
+        return getpass.getpass("Master password: ")
+
+    # A tty-shaped stdin does not guarantee an attentive human (e.g. a pty
+    # allocated for a subprocess with nobody actually watching it) — bound
+    # the wait so a fooled isatty() check fails closed instead of hanging.
+    outcome: dict[str, Any] = {}
+
+    def _read() -> None:
+        try:
+            outcome["password"] = getpass.getpass("Master password: ")
+        except BaseException as exc:  # noqa: BLE001 — relayed to caller below
+            outcome["error"] = exc
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        raise TimeoutError("prompt timed out waiting for master password")
+    if "error" in outcome:
+        raise outcome["error"]
+    return str(outcome["password"])
 
 
 def _helper_command() -> list[str]:
@@ -102,7 +124,7 @@ def _spawn_helper(
     return spawn_isolated_console(cmd, env, popen_fn=popen_fn)
 
 
-def _prompt_approve_inline(request: PromptRequest) -> bool:
+def _prompt_approve_inline(request: PromptRequest, timeout_s: int | None = None) -> bool:
     theme.info(
         "key-amnesia: browser fill approval required",
         file=sys.stderr,
@@ -124,8 +146,28 @@ def _prompt_approve_inline(request: PromptRequest) -> bool:
             file=sys.stderr,
         )
     theme.info("  (passwords are never shown here)", file=sys.stderr)
-    ans = input("Allow fill? [y/N] ").strip().lower()
-    return ans in ("y", "yes")
+
+    if timeout_s is None:
+        ans = input("Allow fill? [y/N] ").strip().lower()
+        return ans in ("y", "yes")
+
+    # Same tty-shaped-but-nobody-there risk as the password prompt — bound it.
+    outcome: dict[str, Any] = {}
+
+    def _read() -> None:
+        try:
+            outcome["ans"] = input("Allow fill? [y/N] ").strip().lower()
+        except BaseException as exc:  # noqa: BLE001 — relayed to caller below
+            outcome["error"] = exc
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        raise TimeoutError("approval prompt timed out")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("ans") in ("y", "yes")
 
 
 def require_browser_fill_approval(
@@ -160,12 +202,19 @@ def require_browser_fill_approval(
             if approve_provider is not None:
                 approved = bool(approve_provider())
             else:
-                approved = _prompt_approve_inline(request)
+                approved = _prompt_approve_inline(request, timeout_s)
         except (EOFError, KeyboardInterrupt):
             return AuthOutcome(
                 ok=False,
                 route="inline",
                 reason="approval cancelled",
+                status_only={"approved": False, "action": "browser-fill-approve"},
+            )
+        except TimeoutError:
+            return AuthOutcome(
+                ok=False,
+                route="inline",
+                reason="approval timed out",
                 status_only={"approved": False, "action": "browser-fill-approve"},
             )
         return AuthOutcome(
@@ -290,7 +339,7 @@ def require_human_auth(
             if password_provider is not None:
                 password = password_provider()
             else:
-                password = _prompt_password_inline(request)
+                password = _prompt_password_inline(request, timeout_s)
         except (EOFError, KeyboardInterrupt):
             audit_event(
                 request.action,
@@ -301,6 +350,16 @@ def require_human_auth(
                 reason="prompt cancelled",
             )
             return AuthOutcome(ok=False, route="inline", reason="prompt cancelled")
+        except TimeoutError:
+            audit_event(
+                request.action,
+                secret_names=request.secret_names,
+                command=request.command or None,
+                route="inline",
+                result="timeout",
+                reason="prompt timed out",
+            )
+            return AuthOutcome(ok=False, route="inline", reason="prompt timed out")
         if not password:
             audit_event(
                 request.action,
@@ -541,7 +600,7 @@ def run_prompt_helper() -> int:
         return 1
 
     theme.info("=" * 50)
-    theme.info("  key-amnesia — human authentication")
+    theme.info("  key-amnesia - human authentication")
     theme.info("=" * 50)
     theme.out(f"Action : {request.action}")
     if request.secret_names:
