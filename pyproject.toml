@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "key-amnesia"
-version = "0.3.0"
+version = "0.3.1"
 description = "Encrypted secret vault with human-prompt routing and output scrubbing"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -21,9 +21,16 @@ dev = ["pytest>=7.0"]
 [project.scripts]
 key-amnesia = "key_amnesia.cli:main"
 ka = "key_amnesia.cli:main"
+key-amnesia-hook = "key_amnesia.hooks.secret_guard:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+key_amnesia = ["skills/*/SKILL.md", "hooks/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

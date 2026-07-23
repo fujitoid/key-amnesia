@@ -16,6 +16,7 @@ from key_amnesia.audit import audit_event
 from key_amnesia.config import ConfigError, load_config, set_config_value
 from key_amnesia.paths import vault_path
 from key_amnesia.prompt_route import PromptRequest, require_human_auth
+from key_amnesia.setup_cmd import cmd_setup
 from key_amnesia import theme
 from key_amnesia.vault import (
     VaultError,
@@ -117,6 +118,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # status
     sub.add_parser("status", help="Show guard session status")
+
+    # setup (agent distribution: skills + PreToolUse/preToolUse hook)
+    p_setup = sub.add_parser(
+        "setup",
+        help="Install agent skills and the secret-guard hook for Claude Code / Cursor",
+    )
+    p_setup.add_argument(
+        "--skills-only",
+        action="store_true",
+        help="Only install skills; skip merging the hook config",
+    )
+    p_setup.add_argument(
+        "--hook-only",
+        action="store_true",
+        help="Only merge the hook config; skip installing skills",
+    )
 
     # internal helper (still supports --help; omitted from epilog summary)
     sub.add_parser("_prompt-helper", help=argparse.SUPPRESS)
@@ -701,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
         "copy": cmd_copy,
         "config": cmd_config,
         "status": cmd_status,
+        "setup": cmd_setup,
     }
     handler = handlers.get(args.command)
     if handler is None:

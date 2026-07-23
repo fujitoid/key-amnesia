@@ -41,6 +41,24 @@ Or from a local clone: `pip install .` — either way you get both the full `key
 
 > Windows and Linux supported; macOS still falls back to fail-closed (not yet implemented).
 
+## Agent bootstrap
+
+Paste this into your coding agent when you want it to install and teach itself key-amnesia (not a human pip walkthrough):
+
+```
+Install key-amnesia and set yourself up to use it correctly for secrets in
+this project:
+1. pip install key-amnesia
+2. Verify `ka --version` works in a fresh terminal (if not found, fix PATH
+   as instructed).
+3. Run `ka setup` (installs its skills + safety hook globally).
+4. Tell me to restart this session so the skill loads, then tell me exactly
+   what to do in my OWN terminal to finish setup (master password etc.) —
+   you cannot do that step yourself.
+```
+
+`ka setup` copies the bundled `key-amnesia-usage`, `key-amnesia-hygiene`, and `key-amnesia-migrate` skills to `~/.claude/skills/` and `~/.cursor/skills/`, and merges a `PreToolUse` (Claude Code) / `preToolUse` (Cursor) hook into each host's own config that blocks tool calls containing inline credential-shaped tokens. Restart or reload the host afterward to pick both up.
+
 ## Two modes: ask every time, or unlock a session
 
 | Mode | What it feels like |
@@ -71,6 +89,7 @@ ka lock                             # end it early, any time
 | `ka copy NAME` | Copy a value to your clipboard instead of showing it (same rule) |
 | `ka config show` / `ka config set KEY VALUE` | View / change settings (changes require your password) |
 | `ka status` | Is a session active, and until when — plus, if not, what happened to the last one |
+| `ka setup` | Install agent skills + the secret-guard hook for Claude Code / Cursor (`--skills-only` / `--hook-only`) |
 
 Every command supports `--help`.
 

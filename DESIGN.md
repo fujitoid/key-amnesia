@@ -4,6 +4,8 @@ Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted v
 
 **0.3.0 cut:** browser-fill and the entire KeePassXC-Browser Native Messaging integration (`browser_fill.py`, `native_host.py`, `native_host_install.py`, `keepass_protocol.py`, `logins.py`, `login_cli.py`, `ka login`, `ka browser-fill`) are removed. `ka unlock` is no longer a detached child process — it *is* the guard, running in the caller's own foreground terminal. New: `ka passwd` / `ka change-password`, admission-consent prompting on the guard's own TTY, and honest death reporting (`last_guard_state.json`).
 
+**0.3.1 (additive, no CLI-surface changes to `set`/`run`/`list`/`init`/`passwd`/`unlock`/`lock`/`status`/`renew`):** the three agent skills move from a root `skills/` copy into the installed package itself (`src/key_amnesia/skills/*/SKILL.md`, shipped as package data); a new blocking PreToolUse/preToolUse secret-guard hook module (`src/key_amnesia/hooks/secret_guard.py`, console script `key-amnesia-hook`) replaces the root `.claude/hooks/` copy; and a new non-interactive `ka setup` command (`src/key_amnesia/setup_cmd.py`) installs both into `~/.claude/` and `~/.cursor/` and merges each host's hook config idempotently.
+
 **Out of scope:** macOS (and Safari); browser integration of any kind (removed, not deferred — see above); passkeys / TOTP; MCP wrapper; GUI; macOS isolated-console spawn (`Terminal.app` / `osascript`); DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
 
 ---
@@ -16,9 +18,10 @@ key-amnesia/
   README.md
   LICENSE                          # Apache 2.0
   .gitignore
+  MANIFEST.in                      # ships skills/*/SKILL.md + hooks/*.py as package data
   pyproject.toml
-  .claude/hooks/                   # PreToolUse secret hooks + install note
-  skills/                          # using-key-amnesia + chat-secret-privacy agent skills
+  .claude/hooks/                   # pointer only — canonical hook now installed via `ka setup`
+  skills/                          # pointer only — canonical skills now installed via `ka setup`
   src/key_amnesia/
     __init__.py
     __main__.py
@@ -36,10 +39,14 @@ key-amnesia/
     clipboard.py
     theme.py                       # branded CLI output (NO_COLOR / non-TTY safe)
     platform.py                    # isolated-console spawn (Windows CREATE_NEW_CONSOLE; Linux emulators + /dev/tty install offer)
+    setup_cmd.py                   # `ka setup`: installs skills + merges hook config into ~/.claude, ~/.cursor
+    skills/                        # packaged agent skills (key-amnesia-usage / -hygiene / -migrate), package data
+    hooks/
+      secret_guard.py              # PreToolUse (Claude) / preToolUse (Cursor) blocking hook; console script key-amnesia-hook
   tests/
 ```
 
-Entry points: `key-amnesia` and `ka` both → `key_amnesia.cli:main`.
+Entry points: `key-amnesia` and `ka` both → `key_amnesia.cli:main`; `key-amnesia-hook` → `key_amnesia.hooks.secret_guard:main`.
 
 Deps: `pynacl`, `pyperclip`. Dev: `pytest`.
 
@@ -250,6 +257,7 @@ Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`
 - `reveal` / `copy` — always fresh auth; display location follows TTY vs helper rule
 - `config set session-mode|session-timeout-minutes` — always fresh auth
 - `status` — live guard status (pid, expiry, secret count, admission state) or the last session's honest death report
+- `setup` — non-interactive: copies the 3 packaged skills to `~/.claude/skills/` + `~/.cursor/skills/` and idempotently merges the secret-guard hook into `~/.claude/settings.json` (`PreToolUse`) + `~/.cursor/hooks.json` (`preToolUse`); `--skills-only` / `--hook-only` to do just one half; never mutates vault/session state
 - `_prompt-helper` — internal; bare argv + env handoff; omitted from top-level summary, still supports `--help`
 
 ---
@@ -284,4 +292,4 @@ The guard and helper IPC replies expose only: status, scrubbed stdout/stderr, ex
 
 ## Testing
 
-Vault round-trip / wrong password / tamper; obsolete browser-fill key migration on load (one-time notice only when `logins` was non-empty, silent drop otherwise, save-side persists the cleanup without a second notice) (`test_vault_migration.py`); `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; `passwd` happy path re-encrypts with a fresh salt, refuses while guard alive, mismatch aborts, wrong current password aborts, TTY-only (`test_passwd_cmd.py`); scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only, admission pre-seeded so verb dispatch itself is under test); cached-session `run` executes in the caller's cwd (threaded through the IPC message); admission-consent prompt approves/denies/times out, known token skips re-prompt, stale token from a different guard re-prompts, round-trips through `guard_request` end to end, `status` reports admission state (`test_guard_admission.py`); honest death reporting for `locked`/`expired`/`interrupted`/`crashed: <ExcType>`, `format_no_guard_message()` phrasing, guard prints its live status banner on start (`test_guard_death_reporting.py`); foreground unlock never spawns a subprocess, a spawned helper console refuses the `unlock` action with a clear reason instead of trying to start anything (`test_foreground_unlock.py`); argparse `--help` walk over the root parser and every subparser renders on a simulated cp1252 console without raising (`test_argparse_help_cp1252.py`); `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled, degrades non-cp1252-encodable caller text instead of crashing (`test_theme.py`).
+Vault round-trip / wrong password / tamper; obsolete browser-fill key migration on load (one-time notice only when `logins` was non-empty, silent drop otherwise, save-side persists the cleanup without a second notice) (`test_vault_migration.py`); `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; `passwd` happy path re-encrypts with a fresh salt, refuses while guard alive, mismatch aborts, wrong current password aborts, TTY-only (`test_passwd_cmd.py`); scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only, admission pre-seeded so verb dispatch itself is under test); cached-session `run` executes in the caller's cwd (threaded through the IPC message); admission-consent prompt approves/denies/times out, known token skips re-prompt, stale token from a different guard re-prompts, round-trips through `guard_request` end to end, `status` reports admission state (`test_guard_admission.py`); honest death reporting for `locked`/`expired`/`interrupted`/`crashed: <ExcType>`, `format_no_guard_message()` phrasing, guard prints its live status banner on start (`test_guard_death_reporting.py`); foreground unlock never spawns a subprocess, a spawned helper console refuses the `unlock` action with a clear reason instead of trying to start anything (`test_foreground_unlock.py`); argparse `--help` walk over the root parser and every subparser renders on a simulated cp1252 console without raising, automatically covers `setup` (`test_argparse_help_cp1252.py`); `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled, degrades non-cp1252-encodable caller text instead of crashing (`test_theme.py`); secret-guard hook blocks every known prefix (OpenAI/Anthropic/AWS/GitHub/GitLab/Slack/Google/Stripe/npm) and high-entropy assignments, allows placeholder assignments (`PASSWORD=test123`), bare mentions, comments, and `ka run`/`ka set` command lines, host detection (Claude vs Cursor payload shape) picks the right deny contract, disable env skips everything, fails open on malformed/empty/non-dict stdin (`test_secret_guard.py`); `ka setup` copies all three skills to both hosts with matching content, overwrites stale copies on rerun, `--skills-only`/`--hook-only` isolate each half, Claude `settings.json` / Cursor `hooks.json` merges preserve unrelated keys and other hooks and are idempotent on rerun, malformed settings recover to a fresh merge, PATH check reports found/not-found via monkeypatched `shutil.which` (`test_setup_cmd.py`); a real wheel build (`pip wheel`) contains all three packaged `SKILL.md` files and the hook module (`test_package_skills_data.py`).
