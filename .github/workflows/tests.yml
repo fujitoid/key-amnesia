@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # Manual re-run after GitHub Actions infra flakes (e.g. action download
+  # "Service Unavailable" during job setup) without needing a no-op commit.
+  workflow_dispatch:
 
 jobs:
   test:
