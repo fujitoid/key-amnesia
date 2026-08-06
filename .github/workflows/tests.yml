@@ -8,6 +8,9 @@ on:
   # Manual re-run after GitHub Actions infra flakes without a no-op commit.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
