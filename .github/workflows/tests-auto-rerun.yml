@@ -1,0 +1,72 @@
+name: tests-auto-rerun
+
+# One automatic re-run of failed matrix jobs when the first attempt dies
+# during GitHub Actions job setup (action download / runner provision),
+# before any Install/Test step runs. Real pytest failures are left alone.
+on:
+  workflow_run:
+    workflows: [tests]
+    types: [completed]
+
+jobs:
+  rerun-setup-flakes-once:
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt == 1
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Re-run if failures are setup-only
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          jobs_json="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --paginate)"
+          echo "Failed jobs:"
+          echo "$jobs_json" | jq -r '.jobs[] | select(.conclusion=="failure") | .name'
+
+          # Count failures that reached a real Install/Test step vs setup-only.
+          non_setup_failures="$(echo "$jobs_json" | jq '
+            [
+              .jobs[]
+              | select(.conclusion == "failure")
+              | select(
+                  any(
+                    .steps[]?;
+                    .conclusion == "failure"
+                    and (.name == "Install" or .name == "Test"
+                         or (.name | startswith("Run pytest"))
+                         or (.name | startswith("Run pip")))
+                  )
+                )
+            ] | length
+          ')"
+
+          setup_failures="$(echo "$jobs_json" | jq '
+            [
+              .jobs[]
+              | select(.conclusion == "failure")
+              | select(
+                  (any(.steps[]?; .conclusion == "failure" and .name == "Set up job"))
+                  or ([.steps[]? | select(.conclusion == "failure")] | length) == 0
+                )
+            ] | length
+          ')"
+
+          echo "non_setup_failures=${non_setup_failures} setup_failures=${setup_failures}"
+
+          if [ "${non_setup_failures}" -gt 0 ]; then
+            echo "Product/test step failed — not auto-rerunning."
+            exit 0
+          fi
+          if [ "${setup_failures}" -eq 0 ]; then
+            echo "No setup-only failures detected — not auto-rerunning."
+            exit 0
+          fi
+
+          echo "Setup-only infra failures detected — re-running failed jobs once."
+          gh run rerun -R "${REPO}" "${RUN_ID}" --failed
